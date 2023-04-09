@@ -1,16 +1,82 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
 )
+
+/*
+ * Http header
+ */
+type httpHeader struct {
+	path     string
+	method   string
+	protocol string
+	hostPort string
+	hasBody  bool
+}
+
+// expect suffixed with "\r\n\r\n"
+func (self *httpHeader) parse(buff []byte) int {
+	fb_end := bytes.Index(buff, []byte("\r\n"))
+	if fb_end < 0 {
+		return -1
+	}
+
+	split := bytes.Split(buff[:fb_end], []byte(" "))
+	if len(split) != 3 {
+		return -1
+	}
+
+	self.method = string(bytes.Trim(split[0], " "))
+	self.path = string(bytes.Trim(split[1], " "))
+	self.protocol = string(bytes.Trim(split[2], " "))
+	self.hasBody = false
+
+	// finding Content-Length & Transfer-Encoding
+	if bytes.Contains(buff, []byte("Content-Length")) {
+		self.hasBody = true
+	}
+
+	if bytes.Contains(buff, []byte("Transfer-Encoding")) {
+		self.hasBody = true
+	}
+
+	// finding host:port
+	var fb_host int
+	var fb_host_end int
+
+	fb_host = bytes.Index(buff[fb_end:], []byte("Host:"))
+	if fb_host < 0 {
+		goto out1
+	}
+
+	// update buffer offset
+	buff = buff[fb_host+fb_end:]
+
+	fb_host_end = bytes.Index(buff, []byte("\r\n"))
+	if fb_host_end < 0 {
+		goto out1
+	}
+
+	split = bytes.SplitN(buff[:fb_host_end], []byte(":"), 2)
+	if len(split) < 1 {
+		goto out1
+	}
+
+	self.hostPort = string(bytes.Trim(split[1], " "))
+	return 0
+
+out1:
+	self.hostPort = ""
+	return 0
+}
 
 /*
  * Server
@@ -51,106 +117,102 @@ func (self *server) handle(address string) error {
 /*
  * Client
  */
-const (
-	HTTP  = 0
-	HTTPS = 1
-)
-
 type client struct {
 	conn   net.Conn
+	count  int
 	buffer [8192]byte
 }
 
 func (self *client) handle(conn net.Conn, wg *sync.WaitGroup) {
+	var addr = conn.RemoteAddr()
+	log.Println("new connection:", addr)
+
 	defer conn.Close()
 	defer wg.Done()
 
+	defer log.Println("closed connection:", addr)
+
+	var firstBytes = self.buffer[:]
+
+	// TODO: handle big request header
+	readBytes, err := conn.Read(firstBytes)
+	if err != nil {
+		log.Printf("%s: %s\n", addr, err.Error())
+		return
+	}
+
+	firstBytes = firstBytes[:readBytes]
+	if !bytes.Contains(firstBytes, []byte("\r\n\r\n")) {
+		log.Printf("%s: %s\n", addr, err.Error())
+		return
+	}
+
+	var header httpHeader
+	if header.parse(firstBytes) < 0 {
+		log.Printf("%s: Invalid http header\n", addr)
+		return
+	}
+
 	self.conn = conn
-	connStr := self.conn.RemoteAddr()
-	log.Println("A new connection from:", connStr)
+	self.count = readBytes
 
-	rd, err := self.conn.Read(self.buffer[:])
-	if err != nil {
-		log.Println("err:", err)
-		return
-	}
+	method := strings.ToLower(header.method)
+	if method == "connect" {
+		if !strings.Contains(header.hostPort, ":") {
+			header.hostPort += ":443"
+		}
 
-	buff := self.buffer[:rd]
-	fmt.Printf("Message from: %s\n%s",
-		connStr,
-		string(buff),
-	)
-
-	reader := bytes.NewReader(buff)
-	req, err := http.ReadRequest(bufio.NewReader(reader))
-	if err != nil {
-		return
-	}
-
-	if strings.Contains(req.Host, "127.0.0.1") {
-		return
-	}
-
-	if strings.ToLower(req.Method) == "connect" {
-		self.handleHTTPS(req, rd)
+		self.handleHTTPS(&header)
 	} else {
-		self.handleHTTP(req, rd)
+		if !strings.Contains(header.hostPort, ":") {
+			header.hostPort += ":80"
+		}
+
+		self.handleHTTP(&header)
 	}
 }
 
-func (self *client) handleHTTP(req *http.Request, buffLen int) {
-	fmt.Println("http:", req.URL.Host)
+func (self *client) handleHTTP(header *httpHeader) {
+	log.Println("http")
+	var addr = self.conn.RemoteAddr()
 
-	host := req.Host
-	if !strings.Contains(host, ":") {
-		host += ":80"
-	}
-
-	conn, err := net.Dial("tcp", host)
+	target, err := net.Dial("tcp", header.hostPort)
 	if err != nil {
-		log.Println(err)
+		log.Printf("%s: %s\n", addr, err)
+		return
+	}
+	defer target.Close()
+
+	// send the firstBytes
+	reader := bytes.NewReader(self.buffer[:self.count])
+	_, err = io.Copy(target, reader)
+	if err != nil {
+		log.Printf("%s: %s\n", addr, err)
 		return
 	}
 
-	defer conn.Close()
-
-	log.Println("connected:", conn.RemoteAddr())
-	self.forward(req, conn, buffLen)
-}
-
-func (self *client) handleHTTPS(req *http.Request, buffLen int) {
-	fmt.Println("https:", req.URL.Host)
-}
-
-func (self *client) forward(req *http.Request, conn net.Conn, buffLen int) {
-	log.Println("forward:", conn.RemoteAddr())
-
-	wrt := 0
-	for wrt < buffLen {
-		wr, err := conn.Write(self.buffer[:buffLen])
+	// send the remaining bytes
+	go func(ctx *client, trg net.Conn) {
+		_, err = io.Copy(trg, ctx.conn)
 		if err != nil {
+			log.Printf("%s: %s\n", self.conn.RemoteAddr(), err)
 			return
 		}
+	}(self, target)
 
-		wrt += wr
+	// recv response bytes from the target
+	_, err = io.Copy(self.conn, target)
+	if err != nil {
+		log.Printf("%s: %s\n", addr, err)
+		return
 	}
+}
 
-	for {
-		rd, err := conn.Read(self.buffer[:])
-		if err != nil {
-			return
-		}
+func (self *client) handleHTTPS(header *httpHeader) {
+	log.Println("https")
+}
 
-		wrt = 0
-		for wrt < rd {
-			wr, err := self.conn.Write(self.buffer[:rd])
-			if err != nil {
-				return
-			}
-
-			wrt += wr
-		}
-	}
+func (self *client) forward() {
 }
 
 func main() {
