@@ -19,7 +19,6 @@ type httpHeader struct {
 	method   string
 	protocol string
 	hostPort string
-	hasBody  bool
 }
 
 // expect suffixed with "\r\n\r\n"
@@ -37,16 +36,6 @@ func (self *httpHeader) parse(buff []byte) int {
 	self.method = string(bytes.Trim(split[0], " "))
 	self.path = string(bytes.Trim(split[1], " "))
 	self.protocol = string(bytes.Trim(split[2], " "))
-	self.hasBody = false
-
-	// finding Content-Length & Transfer-Encoding
-	if bytes.Contains(buff, []byte("Content-Length")) {
-		self.hasBody = true
-	}
-
-	if bytes.Contains(buff, []byte("Transfer-Encoding")) {
-		self.hasBody = true
-	}
 
 	// finding host:port
 	var fb_host int
@@ -76,6 +65,12 @@ func (self *httpHeader) parse(buff []byte) int {
 out1:
 	self.hostPort = ""
 	return 0
+}
+
+// for CONNECT response
+func (self *httpHeader) newConnectResponse(status, message string) []byte {
+	return []byte(fmt.Sprintf("%s %s %s\r\n\r\n", self.protocol, status,
+		message))
 }
 
 /*
@@ -210,9 +205,24 @@ func (self *client) handleHTTP(header *httpHeader) {
 
 func (self *client) handleHTTPS(header *httpHeader) {
 	log.Println("https")
+	var addr = self.conn.RemoteAddr()
+
+	target, err := net.Dial("tcp", header.hostPort)
+	if err != nil {
+		log.Printf("%s: %s\n", addr, err)
+		return
+	}
+	defer target.Close()
+
+	// TODO: poll
 }
 
-func (self *client) forward() {
+func (self *client) genConnectionEstablished() []byte {
+	var header = httpHeader{
+		protocol: "HTTP/1.1",
+	}
+
+	return header.newConnectResponse("200", "Connection Established")
 }
 
 func main() {
