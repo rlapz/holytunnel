@@ -67,12 +67,6 @@ out1:
 	return 0
 }
 
-// for CONNECT response
-func (self *httpHeader) newConnectResponse(status, message string) []byte {
-	return []byte(fmt.Sprintf("%s %s %s\r\n\r\n", self.protocol, status,
-		message))
-}
-
 /*
  * Server
  */
@@ -124,7 +118,6 @@ func (self *client) handle(conn net.Conn, wg *sync.WaitGroup) {
 
 	defer conn.Close()
 	defer wg.Done()
-
 	defer log.Println("closed connection:", addr)
 
 	var firstBytes = self.buffer[:]
@@ -153,8 +146,8 @@ func (self *client) handle(conn net.Conn, wg *sync.WaitGroup) {
 
 	method := strings.ToLower(header.method)
 	if method == "connect" {
-		if !strings.Contains(header.hostPort, ":") {
-			header.hostPort += ":443"
+		if !strings.Contains(header.path, ":") {
+			header.path += ":443"
 		}
 
 		self.handleHTTPS(&header)
@@ -180,26 +173,21 @@ func (self *client) handleHTTP(header *httpHeader) {
 
 	// send the firstBytes
 	reader := bytes.NewReader(self.buffer[:self.count])
-	_, err = io.Copy(target, reader)
-	if err != nil {
+	if _, err = io.Copy(target, reader); err != nil {
 		log.Printf("%s: %s\n", addr, err)
 		return
 	}
 
 	// send the remaining bytes
 	go func(ctx *client, trg net.Conn) {
-		_, err = io.Copy(trg, ctx.conn)
-		if err != nil {
+		if _, err = io.Copy(trg, ctx.conn); err != nil {
 			log.Printf("%s: %s\n", self.conn.RemoteAddr(), err)
-			return
 		}
 	}(self, target)
 
 	// recv response bytes from the target
-	_, err = io.Copy(self.conn, target)
-	if err != nil {
+	if _, err = io.Copy(self.conn, target); err != nil {
 		log.Printf("%s: %s\n", addr, err)
-		return
 	}
 }
 
@@ -207,22 +195,35 @@ func (self *client) handleHTTPS(header *httpHeader) {
 	log.Println("https")
 	var addr = self.conn.RemoteAddr()
 
-	target, err := net.Dial("tcp", header.hostPort)
+	target, err := net.Dial("tcp", header.path)
 	if err != nil {
 		log.Printf("%s: %s\n", addr, err)
 		return
 	}
+
 	defer target.Close()
 
-	// TODO: poll
-}
+	buffer := []byte("HTTP/1.1 200 OK\r\n\r\n")
+	for snd := 0; snd < len(buffer); {
+		s, err := self.conn.Write(buffer[snd:])
+		if err != nil {
+			return
+		}
 
-func (self *client) genConnectionEstablished() []byte {
-	var header = httpHeader{
-		protocol: "HTTP/1.1",
+		snd += s
 	}
 
-	return header.newConnectResponse("200", "Connection Established")
+	// send the remaining bytes
+	go func(ctx *client, trg net.Conn) {
+		if _, err = io.Copy(trg, ctx.conn); err != nil {
+			log.Printf("%s: %s\n", self.conn.RemoteAddr(), err)
+		}
+	}(self, target)
+
+	// recv response bytes from the target
+	if _, err = io.Copy(self.conn, target); err != nil {
+		log.Printf("%s: %s\n", addr, err)
+	}
 }
 
 func main() {
