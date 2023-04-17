@@ -165,8 +165,7 @@ func (self *client) handleHTTP(header *httpHeader, fb int) error {
 	defer target.Close()
 
 	// send the first bytes
-	reader := bytes.NewReader(self.buffer[:fb])
-	if _, err = io.Copy(target, reader); err != nil {
+	if err = splitRequestBytes(target, self.buffer[:fb]); err != nil {
 		return err
 	}
 
@@ -195,13 +194,39 @@ func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 		return err
 	}
 
-	// forwart the traffics
+	// TODO: correct HTTPS HELO packet size
+	rd, err := self.conn.Read(self.buffer[:256])
+	if err != nil {
+		return err
+	}
+
+	if err = splitRequestBytes(target, self.buffer[:rd]); err != nil {
+		return err
+	}
+
+	// forward the traffics
 	go func(ctx *client, trg net.Conn) {
 		_, err = io.Copy(trg, ctx.conn)
 	}(self, target)
 
 	if _, err := io.Copy(self.conn, target); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func splitRequestBytes(target net.Conn, buffer []byte) error {
+	var splitSize = 4
+
+	snd := 0
+	for snd < len(buffer) {
+		s, err := target.Write(buffer[snd : splitSize+snd])
+		if err != nil {
+			return err
+		}
+
+		snd += s
 	}
 
 	return nil
