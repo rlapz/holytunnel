@@ -2,13 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"strings"
-	"sync"
 )
 
 /*
@@ -21,16 +21,20 @@ type httpHeader struct {
 	hostPort string
 }
 
+var (
+	ErrHttpHeaderInval = errors.New("invalid http header")
+)
+
 // expect suffixed with "\r\n\r\n"
-func (self *httpHeader) parse(buff []byte) int {
+func (self *httpHeader) parse(buff []byte) error {
 	fb_end := bytes.Index(buff, []byte("\r\n"))
 	if fb_end < 0 {
-		return -1
+		return ErrHttpHeaderInval
 	}
 
 	split := bytes.Split(buff[:fb_end], []byte(" "))
 	if len(split) != 3 {
-		return -1
+		return ErrHttpHeaderInval
 	}
 
 	self.method = string(bytes.Trim(split[0], " "))
@@ -60,47 +64,32 @@ func (self *httpHeader) parse(buff []byte) int {
 	}
 
 	self.hostPort = string(bytes.Trim(split[1], " "))
-	return 0
+	return nil
 
 out1:
 	self.hostPort = ""
-	return 0
+	return nil
 }
 
 /*
  * Server
  */
-type server struct {
-	isAlive   bool
-	listener  net.Listener
-	waitGroup sync.WaitGroup
-}
-
-func (self *server) run(address string) error {
-	return self.handle(address)
-}
-
-func (self *server) handle(address string) error {
+func runServer(address string) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
 	}
-
 	defer listener.Close()
 
-	self.listener = listener
-	self.isAlive = true
-	for self.isAlive {
-		if conn, err := listener.Accept(); err == nil {
-			self.waitGroup.Add(1)
-			go new(client).handle(conn, &self.waitGroup)
-		} else {
-			log.Println(err)
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Println("Cannot accept a new client:", err.Error())
+			continue
 		}
-	}
 
-	self.waitGroup.Wait()
-	return nil
+		go NewClient(conn).handle()
+	}
 }
 
 /*
@@ -108,122 +97,114 @@ func (self *server) handle(address string) error {
  */
 type client struct {
 	conn   net.Conn
-	count  int
 	buffer [8192]byte
 }
 
-func (self *client) handle(conn net.Conn, wg *sync.WaitGroup) {
-	var addr = conn.RemoteAddr()
-	log.Println("new connection:", addr)
+func NewClient(conn net.Conn) *client {
+	return &client{
+		conn: conn,
+	}
+}
 
-	defer conn.Close()
-	defer wg.Done()
-	defer log.Println("closed connection:", addr)
+func (self *client) handle() {
+	var rAddr = self.conn.RemoteAddr()
 
-	var firstBytes = self.buffer[:]
+	defer self.conn.Close()
+	defer log.Println("closed connection:", rAddr)
+	log.Println("new connection:", rAddr)
+
+	var buff []byte
+	var header httpHeader
 
 	// TODO: handle big request header
-	readBytes, err := conn.Read(firstBytes)
+	recvd, err := self.conn.Read(self.buffer[:])
 	if err != nil {
-		log.Printf("%s: %s\n", addr, err.Error())
-		return
+		goto err0
 	}
 
-	firstBytes = firstBytes[:readBytes]
-	if !bytes.Contains(firstBytes, []byte("\r\n\r\n")) {
-		log.Printf("%s: %s\n", addr, err.Error())
-		return
+	buff = self.buffer[:recvd]
+	if !bytes.Contains(buff, []byte("\r\n\r\n")) {
+		goto err0
 	}
 
-	var header httpHeader
-	if header.parse(firstBytes) < 0 {
-		log.Printf("%s: Invalid http header\n", addr)
-		return
+	err = header.parse(buff)
+	if err != nil {
+		goto err0
 	}
 
-	self.conn = conn
-	self.count = readBytes
-
-	method := strings.ToLower(header.method)
-	if method == "connect" {
+	switch strings.ToLower(header.method) {
+	case "connect":
 		if !strings.Contains(header.path, ":") {
 			header.path += ":443"
 		}
 
-		self.handleHTTPS(&header)
-	} else {
+		if err = self.handleHTTPS(&header, recvd); err != nil {
+			goto err0
+		}
+	default:
 		if !strings.Contains(header.hostPort, ":") {
 			header.hostPort += ":80"
 		}
 
-		self.handleHTTP(&header)
+		if err = self.handleHTTP(&header, recvd); err != nil {
+			goto err0
+		}
 	}
+
+	return
+
+err0:
+	log.Printf("Error: %s: %s\n", rAddr, err.Error())
 }
 
-func (self *client) handleHTTP(header *httpHeader) {
-	log.Println("http")
-	var addr = self.conn.RemoteAddr()
-
+func (self *client) handleHTTP(header *httpHeader, fb int) error {
 	target, err := net.Dial("tcp", header.hostPort)
 	if err != nil {
-		log.Printf("%s: %s\n", addr, err)
-		return
+		return err
 	}
 	defer target.Close()
 
-	// send the firstBytes
-	reader := bytes.NewReader(self.buffer[:self.count])
+	// send the first bytes
+	reader := bytes.NewReader(self.buffer[:fb])
 	if _, err = io.Copy(target, reader); err != nil {
-		log.Printf("%s: %s\n", addr, err)
-		return
+		return err
 	}
 
-	// send the remaining bytes
+	// forward the traffics
 	go func(ctx *client, trg net.Conn) {
-		if _, err = io.Copy(trg, ctx.conn); err != nil {
-			log.Printf("%s: %s\n", self.conn.RemoteAddr(), err)
-		}
+		_, err = io.Copy(trg, ctx.conn)
 	}(self, target)
 
-	// recv response bytes from the target
 	if _, err = io.Copy(self.conn, target); err != nil {
-		log.Printf("%s: %s\n", addr, err)
+		return err
 	}
+
+	return nil
 }
 
-func (self *client) handleHTTPS(header *httpHeader) {
-	log.Println("https")
-	var addr = self.conn.RemoteAddr()
-
+func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 	target, err := net.Dial("tcp", header.path)
 	if err != nil {
-		log.Printf("%s: %s\n", addr, err)
-		return
+		return err
 	}
-
 	defer target.Close()
 
-	buffer := []byte("HTTP/1.1 200 OK\r\n\r\n")
-	for snd := 0; snd < len(buffer); {
-		s, err := self.conn.Write(buffer[snd:])
-		if err != nil {
-			return
-		}
-
-		snd += s
+	// send established tunneling status
+	reader := bytes.NewReader([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+	if _, err = io.Copy(self.conn, reader); err != nil {
+		return err
 	}
 
-	// send the remaining bytes
+	// forwart the traffics
 	go func(ctx *client, trg net.Conn) {
-		if _, err = io.Copy(trg, ctx.conn); err != nil {
-			log.Printf("%s: %s\n", self.conn.RemoteAddr(), err)
-		}
+		_, err = io.Copy(trg, ctx.conn)
 	}(self, target)
 
-	// recv response bytes from the target
-	if _, err = io.Copy(self.conn, target); err != nil {
-		log.Printf("%s: %s\n", addr, err)
+	if _, err := io.Copy(self.conn, target); err != nil {
+		return err
 	}
+
+	return nil
 }
 
 func main() {
@@ -234,8 +215,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	var srv server
-	if err := srv.run(args[1]); err != nil {
+	if err := runServer(args[1]); err != nil {
 		log.Panicln(err)
 	}
 }
