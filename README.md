@@ -1,9 +1,9 @@
-# holy_tunnel
-Anti censorship DNS DPI, inspired by GreenTunnel.
+# holytunnel
+Bypass DNS DPI censorship, inspired by GreenTunnel.
 
 
 ## Note
-Please use `dnscrypt-proxy` for better experience, since this program doesn't support (And probably never) Dot/Doh DNS query.
+For a better experience, please use `dnscrypt-proxy` since this program doesn't support (and probably never) Dot/Doh DNS query.
 
 
 ## How to build
