@@ -217,7 +217,7 @@ func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 }
 
 func splitRequestBytes(target net.Conn, buffer []byte) error {
-	var splitSize = 4
+	var splitSize = 64
 
 	snd := 0
 	for snd < len(buffer) {
