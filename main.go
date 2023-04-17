@@ -124,6 +124,7 @@ func (self *client) handle() {
 
 	buff = self.buffer[:recvd]
 	if !bytes.Contains(buff, []byte("\r\n\r\n")) {
+		err = ErrHttpHeaderInval
 		goto err0
 	}
 
