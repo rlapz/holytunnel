@@ -17,7 +17,6 @@ import (
 type httpHeader struct {
 	path     string
 	method   string
-	protocol string
 	hostPort string
 }
 
@@ -26,39 +25,38 @@ var (
 )
 
 // expect suffixed with "\r\n\r\n"
-func (self *httpHeader) parse(buff []byte) error {
-	fb_end := bytes.Index(buff, []byte("\r\n"))
+func (self *httpHeader) parse(buffer []byte) error {
+	fb_end := bytes.Index(buffer, []byte("\r\n"))
 	if fb_end < 0 {
 		return ErrHttpHeaderInval
 	}
 
-	split := bytes.Split(buff[:fb_end], []byte(" "))
+	split := bytes.Split(buffer[:fb_end], []byte(" "))
 	if len(split) != 3 {
 		return ErrHttpHeaderInval
 	}
 
 	self.method = string(bytes.Trim(split[0], " "))
 	self.path = string(bytes.Trim(split[1], " "))
-	self.protocol = string(bytes.Trim(split[2], " "))
 
 	// finding host:port
 	var fb_host int
 	var fb_host_end int
 
-	fb_host = bytes.Index(buff[fb_end:], []byte("Host:"))
+	fb_host = bytes.Index(buffer[fb_end:], []byte("Host:"))
 	if fb_host < 0 {
 		goto out1
 	}
 
 	// update buffer offset
-	buff = buff[fb_host+fb_end:]
+	buffer = buffer[fb_host+fb_end:]
 
-	fb_host_end = bytes.Index(buff, []byte("\r\n"))
+	fb_host_end = bytes.Index(buffer, []byte("\r\n"))
 	if fb_host_end < 0 {
 		goto out1
 	}
 
-	split = bytes.SplitN(buff[:fb_host_end], []byte(":"), 2)
+	split = bytes.SplitN(buffer[:fb_host_end], []byte(":"), 2)
 	if len(split) < 1 {
 		goto out1
 	}
@@ -113,23 +111,22 @@ func (self *client) handle() {
 	defer log.Println("closed connection:", rAddr)
 	log.Println("new connection:", rAddr)
 
-	var buff []byte
+	var buffer = self.buffer[:]
 	var header httpHeader
 
 	// TODO: handle big request header
-	recvd, err := self.conn.Read(self.buffer[:])
+	recvd, err := self.conn.Read(buffer)
 	if err != nil {
 		goto err0
 	}
 
-	buff = self.buffer[:recvd]
-	if !bytes.Contains(buff, []byte("\r\n\r\n")) {
+	buffer = buffer[:recvd]
+	if !bytes.Contains(buffer, []byte("\r\n\r\n")) {
 		err = ErrHttpHeaderInval
 		goto err0
 	}
 
-	err = header.parse(buff)
-	if err != nil {
+	if err = header.parse(buffer); err != nil {
 		goto err0
 	}
 
@@ -171,9 +168,9 @@ func (self *client) handleHTTP(header *httpHeader, fb int) error {
 	}
 
 	// forward the traffics
-	go func(ctx *client, trg net.Conn) {
-		_, err = io.Copy(trg, ctx.conn)
-	}(self, target)
+	go func() {
+		_, err = io.Copy(target, self.conn)
+	}()
 
 	if _, err = io.Copy(self.conn, target); err != nil {
 		return err
@@ -206,9 +203,9 @@ func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 	}
 
 	// forward the traffics
-	go func(ctx *client, trg net.Conn) {
-		_, err = io.Copy(trg, ctx.conn)
-	}(self, target)
+	go func() {
+		_, err = io.Copy(target, self.conn)
+	}()
 
 	if _, err := io.Copy(self.conn, target); err != nil {
 		return err
@@ -218,11 +215,9 @@ func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 }
 
 func splitRequestBytes(target net.Conn, buffer []byte) error {
-	var splitSize = 64
-
 	snd := 0
 	for snd < len(buffer) {
-		s, err := target.Write(buffer[snd : splitSize+snd])
+		s, err := target.Write(buffer[snd : snd+64])
 		if err != nil {
 			return err
 		}
