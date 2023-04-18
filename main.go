@@ -24,8 +24,11 @@ var (
 	ErrHttpHeaderInval = errors.New("invalid http header")
 )
 
-// expect suffixed with "\r\n\r\n"
 func (self *httpHeader) parse(buffer []byte) error {
+	if !bytes.Contains(buffer, []byte("\r\n\r\n")) {
+		return ErrHttpHeaderInval
+	}
+
 	fb_end := bytes.Index(buffer, []byte("\r\n"))
 	if fb_end < 0 {
 		return ErrHttpHeaderInval
@@ -121,11 +124,6 @@ func (self *client) handle() {
 	}
 
 	buffer = buffer[:recvd]
-	if !bytes.Contains(buffer, []byte("\r\n\r\n")) {
-		err = ErrHttpHeaderInval
-		goto err0
-	}
-
 	if err = header.parse(buffer); err != nil {
 		goto err0
 	}
