@@ -15,7 +15,6 @@ import (
  * Http header
  */
 type httpHeader struct {
-	path     string
 	method   string
 	hostPort string
 }
@@ -34,41 +33,33 @@ func (self *httpHeader) parse(buffer []byte) error {
 		return ErrHttpHeaderInval
 	}
 
-	split := bytes.Split(buffer[:fb_end], []byte(" "))
-	if len(split) != 3 {
+	method_end := bytes.Index(buffer[:fb_end], []byte(" "))
+	if method_end < 0 {
 		return ErrHttpHeaderInval
 	}
 
-	self.method = string(bytes.Trim(split[0], " "))
-	self.path = string(bytes.Trim(split[1], " "))
+	self.method = string(bytes.Trim(buffer[:method_end], " "))
 
 	// finding host:port
-	var fb_host int
-	var fb_host_end int
-
-	fb_host = bytes.Index(buffer[fb_end:], []byte("Host:"))
+	fb_host := bytes.Index(buffer[fb_end:], []byte("Host:"))
 	if fb_host < 0 {
-		goto out1
+		return ErrHttpHeaderInval
 	}
 
 	// update buffer offset
 	buffer = buffer[fb_host+fb_end:]
 
-	fb_host_end = bytes.Index(buffer, []byte("\r\n"))
+	fb_host_end := bytes.Index(buffer, []byte("\r\n"))
 	if fb_host_end < 0 {
-		goto out1
+		return ErrHttpHeaderInval
 	}
 
-	split = bytes.SplitN(buffer[:fb_host_end], []byte(":"), 2)
+	split := bytes.SplitN(buffer[:fb_host_end], []byte(":"), 2)
 	if len(split) < 1 {
-		goto out1
+		return ErrHttpHeaderInval
 	}
 
 	self.hostPort = string(bytes.Trim(split[1], " "))
-	return nil
-
-out1:
-	self.hostPort = ""
 	return nil
 }
 
@@ -130,8 +121,8 @@ func (self *client) handle() {
 
 	switch strings.ToLower(header.method) {
 	case "connect":
-		if !strings.Contains(header.path, ":") {
-			header.path += ":443"
+		if !strings.Contains(header.hostPort, ":") {
+			header.hostPort += ":443"
 		}
 
 		if err = self.handleHTTPS(&header, recvd); err != nil {
@@ -166,19 +157,13 @@ func (self *client) handleHTTP(header *httpHeader, fb int) error {
 	}
 
 	// forward the traffics
-	go func() {
-		_, err = io.Copy(target, self.conn)
-	}()
-
-	if _, err = io.Copy(self.conn, target); err != nil {
-		return err
-	}
+	forwardAll(target, self.conn)
 
 	return nil
 }
 
 func (self *client) handleHTTPS(header *httpHeader, fb int) error {
-	target, err := net.Dial("tcp", header.path)
+	target, err := net.Dial("tcp", header.hostPort)
 	if err != nil {
 		return err
 	}
@@ -201,15 +186,17 @@ func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 	}
 
 	// forward the traffics
-	go func() {
-		_, err = io.Copy(target, self.conn)
-	}()
-
-	if _, err := io.Copy(self.conn, target); err != nil {
-		return err
-	}
+	forwardAll(target, self.conn)
 
 	return nil
+}
+
+func forwardAll(target, source net.Conn) {
+	go func() {
+		io.Copy(target, source)
+	}()
+
+	io.Copy(source, target)
 }
 
 func splitRequestBytes(target net.Conn, buffer []byte) error {
