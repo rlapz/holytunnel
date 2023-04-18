@@ -11,17 +11,21 @@ import (
 	"strings"
 )
 
+const (
+	BUFFER_SIZE       = 8192
+	HTTPS_HELO_SIZE   = 256 // TODO: correct HTTPS HELO packet size
+	PACKET_SPLIT_SIZE = 64
+)
+
 /*
  * Http header
  */
 type httpHeader struct {
-	method   string
-	hostPort string
+	hostPort         string
+	hasConnectMethod bool
 }
 
-var (
-	ErrHttpHeaderInval = errors.New("invalid http header")
-)
+var ErrHttpHeaderInval = errors.New("invalid http header")
 
 func (self *httpHeader) parse(buffer []byte) error {
 	if !bytes.Contains(buffer, []byte("\r\n\r\n")) {
@@ -38,7 +42,12 @@ func (self *httpHeader) parse(buffer []byte) error {
 		return ErrHttpHeaderInval
 	}
 
-	self.method = string(bytes.Trim(buffer[:method_end], " "))
+	header := bytes.Trim(buffer[:method_end], " ")
+	if bytes.Equal(bytes.ToLower(header), []byte("connect")) {
+		self.hasConnectMethod = true
+	} else {
+		self.hasConnectMethod = false
+	}
 
 	// finding host:port
 	fb_host := bytes.Index(buffer[fb_end:], []byte("Host:"))
@@ -54,12 +63,22 @@ func (self *httpHeader) parse(buffer []byte) error {
 		return ErrHttpHeaderInval
 	}
 
+	// TODO: handle IPv6
 	split := bytes.SplitN(buffer[:fb_host_end], []byte(":"), 2)
 	if len(split) < 1 {
 		return ErrHttpHeaderInval
 	}
 
-	self.hostPort = string(bytes.Trim(split[1], " "))
+	hostPort := string(bytes.Trim(split[1], " "))
+	if !strings.Contains(hostPort, ":") {
+		if self.hasConnectMethod {
+			hostPort += ":443"
+		} else {
+			hostPort += ":80"
+		}
+	}
+
+	self.hostPort = hostPort
 	return nil
 }
 
@@ -74,13 +93,13 @@ func runServer(address string) error {
 	defer listener.Close()
 
 	for {
-		conn, err := listener.Accept()
+		sourceConn, err := listener.Accept()
 		if err != nil {
 			log.Println("Cannot accept a new client:", err.Error())
 			continue
 		}
 
-		go NewClient(conn).handle()
+		go NewClient(sourceConn).handle()
 	}
 }
 
@@ -88,93 +107,79 @@ func runServer(address string) error {
  * Client
  */
 type client struct {
-	conn   net.Conn
-	buffer [8192]byte
+	source net.Conn
+	target net.Conn
 }
 
 func NewClient(conn net.Conn) *client {
 	return &client{
-		conn: conn,
+		source: conn,
 	}
 }
 
 func (self *client) handle() {
-	var rAddr = self.conn.RemoteAddr()
+	defer self.source.Close()
 
-	defer self.conn.Close()
+	var rAddr = self.source.RemoteAddr()
 	defer log.Println("closed connection:", rAddr)
 	log.Println("new connection:", rAddr)
 
-	var buffer = self.buffer[:]
+	var buffer [BUFFER_SIZE]byte
 	var header httpHeader
 
 	// TODO: handle big request header
-	recvd, err := self.conn.Read(buffer)
+	recvd, err := self.source.Read(buffer[:])
 	if err != nil {
-		goto err0
+		if !errors.Is(err, io.EOF) {
+			return
+		}
+
+		log.Printf("Error: conn.Read: source: %s: %s\n", rAddr, err)
+		return
 	}
 
-	buffer = buffer[:recvd]
-	if err = header.parse(buffer); err != nil {
-		goto err0
+	if err = header.parse(buffer[:recvd]); err != nil {
+		log.Printf("Error: header.parse: %s: %s\n", rAddr, err)
+		return
 	}
 
-	switch strings.ToLower(header.method) {
-	case "connect":
-		if !strings.Contains(header.hostPort, ":") {
-			header.hostPort += ":443"
+	// connect to the target host
+	self.target, err = net.Dial("tcp", header.hostPort)
+	if err != nil {
+		log.Printf("Error: net.Dial: target: %s: %s\n", rAddr, err)
+		return
+	}
+	defer self.target.Close()
+
+	if header.hasConnectMethod {
+		if err = self.handleHTTPS(&header, buffer[:]); err != nil {
+			log.Printf("Error: handleHTTPS: %s: %s\n", rAddr, err)
 		}
 
-		if err = self.handleHTTPS(&header, recvd); err != nil {
-			goto err0
-		}
-	default:
-		if !strings.Contains(header.hostPort, ":") {
-			header.hostPort += ":80"
-		}
-
-		if err = self.handleHTTP(&header, recvd); err != nil {
-			goto err0
-		}
+		return
 	}
 
-	return
-
-err0:
-	log.Printf("Error: %s: %s\n", rAddr, err.Error())
+	if err = self.handleHTTP(&header, buffer[:recvd]); err != nil {
+		log.Printf("Error: handleHTTP: %s: %s\n", rAddr, err)
+	}
 }
 
-func (self *client) handleHTTP(header *httpHeader, fb int) error {
-	target, err := net.Dial("tcp", header.hostPort)
-	if err != nil {
-		return err
-	}
-	defer target.Close()
-
+func (self *client) handleHTTP(header *httpHeader, buffer []byte) error {
 	// send the first bytes
-	if err = splitRequestBytes(target, self.buffer[:fb]); err != nil {
+	if err := self.splitRequestBytes(buffer); err != nil {
 		return err
 	}
 
-	// forward the traffics
-	forwardAll(target, self.conn)
-
+	// forward all traffics
+	self.forwardAll()
 	return nil
 }
 
-func (self *client) handleHTTPS(header *httpHeader, fb int) error {
-	src := self.conn
-	target, err := net.Dial("tcp", header.hostPort)
-	if err != nil {
-		return err
-	}
-	defer target.Close()
-
+func (self *client) handleHTTPS(header *httpHeader, buffer []byte) error {
 	// send established tunneling status
-	sent := 0
 	resp := []byte("HTTP/1.1 200 OK\r\n\r\n")
-	for sent < len(resp) {
-		w, err := src.Write(resp[sent:])
+	for sent := 0; sent < len(resp); {
+		w, err := self.source.Write(resp[sent:])
 		if err != nil {
 			return err
 		}
@@ -182,34 +187,33 @@ func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 		sent += w
 	}
 
-	// TODO: correct HTTPS HELO packet size
-	rd, err := src.Read(self.buffer[:256])
+	// Read HTTPS HELO packet
+	rd, err := self.source.Read(buffer[:HTTPS_HELO_SIZE])
 	if err != nil {
 		return err
 	}
 
-	if err = splitRequestBytes(target, self.buffer[:rd]); err != nil {
+	// "intercepts" and forward HTTPS HELO packet
+	if err = self.splitRequestBytes(buffer[:rd]); err != nil {
 		return err
 	}
 
-	// forward the traffics
-	forwardAll(target, src)
-
+	// forward all traffics
+	self.forwardAll()
 	return nil
 }
 
-func forwardAll(target, source net.Conn) {
+func (self *client) forwardAll() {
 	go func() {
-		io.Copy(target, source)
+		io.Copy(self.target, self.source)
 	}()
 
-	io.Copy(source, target)
+	io.Copy(self.source, self.target)
 }
 
-func splitRequestBytes(target net.Conn, buffer []byte) error {
-	snd := 0
-	for snd < len(buffer) {
-		s, err := target.Write(buffer[snd : snd+64])
+func (self *client) splitRequestBytes(buffer []byte) error {
+	for snd := 0; snd < len(buffer); {
+		s, err := self.target.Write(buffer[snd : snd+PACKET_SPLIT_SIZE])
 		if err != nil {
 			return err
 		}
@@ -222,8 +226,7 @@ func splitRequestBytes(target net.Conn, buffer []byte) error {
 
 func main() {
 	args := os.Args
-	argc := len(args)
-	if argc != 2 {
+	if len(args) != 2 {
 		fmt.Println("Not enough argument!\nholytunnel [HOST:PORT]")
 		os.Exit(1)
 	}
