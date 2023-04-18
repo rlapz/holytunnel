@@ -163,6 +163,7 @@ func (self *client) handleHTTP(header *httpHeader, fb int) error {
 }
 
 func (self *client) handleHTTPS(header *httpHeader, fb int) error {
+	src := self.conn
 	target, err := net.Dial("tcp", header.hostPort)
 	if err != nil {
 		return err
@@ -170,13 +171,19 @@ func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 	defer target.Close()
 
 	// send established tunneling status
-	reader := bytes.NewReader([]byte("HTTP/1.1 200 OK\r\n\r\n"))
-	if _, err = io.Copy(self.conn, reader); err != nil {
-		return err
+	sent := 0
+	resp := []byte("HTTP/1.1 200 OK\r\n\r\n")
+	for sent < len(resp) {
+		w, err := src.Write(resp[sent:])
+		if err != nil {
+			return err
+		}
+
+		sent += w
 	}
 
 	// TODO: correct HTTPS HELO packet size
-	rd, err := self.conn.Read(self.buffer[:256])
+	rd, err := src.Read(self.buffer[:256])
 	if err != nil {
 		return err
 	}
@@ -186,7 +193,7 @@ func (self *client) handleHTTPS(header *httpHeader, fb int) error {
 	}
 
 	// forward the traffics
-	forwardAll(target, self.conn)
+	forwardAll(target, src)
 
 	return nil
 }
