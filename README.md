@@ -1,5 +1,5 @@
 # holytunnel
-Bypass DNS DPI censorship, inspired by GreenTunnel.
+Bypass DPI censorship, inspired by GreenTunnel.
 
 
 ## Note
