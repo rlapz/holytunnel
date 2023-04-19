@@ -175,13 +175,8 @@ func (self *client) handle() {
 
 func (self *client) handleHTTP(header *httpHeader, buffer []byte) error {
 	// send the first bytes
-	for snt := 0; snt < len(buffer); {
-		s, err := self.target.Write(buffer[snt:])
-		if err != nil {
-			return err
-		}
-
-		snt += s
+	if err := writeAllBytes(self.target, buffer); err != nil {
+		return err
 	}
 
 	// forward all traffics
@@ -192,13 +187,8 @@ func (self *client) handleHTTP(header *httpHeader, buffer []byte) error {
 func (self *client) handleHTTPS(header *httpHeader, buffer []byte) error {
 	// send established tunneling status
 	resp := []byte("HTTP/1.1 200 OK\r\n\r\n")
-	for sent := 0; sent < len(resp); {
-		w, err := self.source.Write(resp[sent:])
-		if err != nil {
-			return err
-		}
-
-		sent += w
+	if err := writeAllBytes(self.source, resp); err != nil {
+		return err
 	}
 
 	// Read HTTPS HELO packet
@@ -233,6 +223,19 @@ func (self *client) splitRequestBytes(buffer []byte) error {
 		}
 
 		snd += s
+	}
+
+	return nil
+}
+
+func writeAllBytes(conn net.Conn, buffer []byte) error {
+	for sent := 0; sent < len(buffer); {
+		w, err := conn.Write(buffer[sent:])
+		if err != nil {
+			return err
+		}
+
+		sent += w
 	}
 
 	return nil
