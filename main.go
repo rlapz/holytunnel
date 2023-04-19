@@ -28,59 +28,66 @@ type httpHeader struct {
 var ErrHttpHeaderInval = errors.New("invalid http header")
 
 func (self *httpHeader) parse(buffer []byte) error {
-	if !bytes.Contains(buffer, []byte("\r\n\r\n")) {
+	buffEndIdx := bytes.Index(buffer, []byte("\r\n\r\n"))
+	if buffEndIdx < 0 {
 		return ErrHttpHeaderInval
 	}
 
-	fbEnd := bytes.Index(buffer, []byte("\r\n"))
-	if fbEnd < 0 {
+	// update buffer offset
+	buffer = buffer[:buffEndIdx]
+
+	reqEnd := bytes.Index(buffer, []byte("\r\n"))
+	if reqEnd < 0 {
 		return ErrHttpHeaderInval
 	}
 
 	// finding method type
-	methodEnd := bytes.Index(buffer[:fbEnd], []byte(" "))
-	if methodEnd < 0 {
+	methodEndIdx := bytes.Index(buffer[:reqEnd], []byte(" "))
+	if methodEndIdx < 0 {
 		return ErrHttpHeaderInval
 	}
 
-	method := bytes.Trim(buffer[:methodEnd], " ")
-	if bytes.Equal(bytes.ToUpper(method), []byte("CONNECT")) {
+	method := bytes.ToUpper(bytes.Trim(buffer[:methodEndIdx], " "))
+	if bytes.Equal(method, []byte("CONNECT")) {
 		self.hasConnectMethod = true
 	} else {
 		self.hasConnectMethod = false
 	}
 
+	// update buffer offset
+	buffer = buffer[reqEnd+2:]
+
 	// finding host:port
-	hdHost := []byte("Host:")
-	fbHost := bytes.Index(buffer[fbEnd:], hdHost)
-	if fbHost < 0 {
+	keyHost := []byte("Host:")
+	valHostIdx := bytes.Index(buffer, keyHost)
+	if valHostIdx < 0 {
 		return ErrHttpHeaderInval
 	}
 
-	bufHostPort := buffer[fbHost+fbEnd+len(hdHost):]
-	fbHostEnd := bytes.Index(bufHostPort, []byte("\r\n"))
-	if fbHostEnd < 0 {
-		return ErrHttpHeaderInval
+	valHost := buffer[valHostIdx+len(keyHost):]
+	valHostEndIdx := bytes.Index(valHost, []byte("\r\n"))
+	if valHostEndIdx < 0 {
+		valHostEndIdx = len(valHost)
 	}
 
-	hostPort := bytes.Trim(bufHostPort[:fbHostEnd], " ")
-	sHostPort := string(hostPort)
+	hostPort := bytes.Trim(valHost[:valHostEndIdx], " ")
+	hostPortStr := string(hostPort)
 
-	// check host ip version
-	idxIPv6End := bytes.Index(hostPort, []byte("]"))
-	if idxIPv6End < 0 {
+	// check ip version
+	ipv6Idx := bytes.Index(hostPort, []byte("]"))
+	if ipv6Idx < 0 {
 		// IPv4
 		if !bytes.Contains(hostPort, []byte(":")) {
-			sHostPort = self.addPort(sHostPort)
+			hostPortStr = self.addPort(hostPortStr)
 		}
 	} else {
 		// IPv6
-		if bytes.Index(hostPort[idxIPv6End:], []byte(":")) == -1 {
-			sHostPort = self.addPort(sHostPort)
+		if bytes.Index(hostPort[ipv6Idx:], []byte(":")) == -1 {
+			hostPortStr = self.addPort(hostPortStr)
 		}
 	}
 
-	self.hostPort = sHostPort
+	self.hostPort = hostPortStr
 	return nil
 }
 
@@ -133,9 +140,6 @@ func (self *client) handle() {
 	defer self.source.Close()
 
 	var rAddr = self.source.RemoteAddr()
-	defer log.Println("closed connection:", rAddr)
-	log.Println("new connection:", rAddr)
-
 	var buffer [BUFFER_SIZE]byte
 	var header httpHeader
 
@@ -163,13 +167,16 @@ func (self *client) handle() {
 	}
 	defer self.target.Close()
 
+	log.Printf("%s -> %s\n", rAddr, header.hostPort)
 	if header.hasConnectMethod {
 		if err = self.handleHTTPS(&header, buffer[:]); err != nil {
-			log.Printf("Error: handleHTTPS: %s: %s\n", rAddr, err)
+			log.Printf("Error: handleHTTPS: %s -> %s: %s\n", rAddr,
+				header.hostPort, err)
 		}
 	} else {
 		if err = self.handleHTTP(&header, buffer[:recvd]); err != nil {
-			log.Printf("Error: handleHTTP: %s: %s\n", rAddr, err)
+			log.Printf("Error: handleHTTPS: %s -> %s: %s\n", rAddr,
+				header.hostPort, err)
 		}
 	}
 }
