@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	BUFFER_SIZE       = 8192
-	HTTPS_HELO_SIZE   = 256 // TODO: correct HTTPS HELO packet size
-	PACKET_SPLIT_SIZE = 64
+	BUFFER_SIZE            = 8192
+	HTTPS_HELO_SIZE        = 256 // TODO: correct HTTPS HELO packet size
+	HTTPS_HELO_SPLIT_SIZE  = 64
+	HTTP_HEADER_SPLIT_SIZE = 4
 )
 
 /*
@@ -175,7 +176,8 @@ func (self *client) handle() {
 
 func (self *client) handleHTTP(header *httpHeader, buffer []byte) error {
 	// send the first bytes
-	if err := writeAllBytes(self.target, buffer); err != nil {
+	err := self.splitRequestBytes(buffer, HTTP_HEADER_SPLIT_SIZE)
+	if err != nil {
 		return err
 	}
 
@@ -198,7 +200,8 @@ func (self *client) handleHTTPS(header *httpHeader, buffer []byte) error {
 	}
 
 	// "intercepts" and forward HTTPS HELO packet
-	if err = self.splitRequestBytes(buffer[:rd]); err != nil {
+	err = self.splitRequestBytes(buffer[:rd], HTTPS_HELO_SPLIT_SIZE)
+	if err != nil {
 		return err
 	}
 
@@ -215,14 +218,27 @@ func (self *client) forwardAll() {
 	io.Copy(self.source, self.target)
 }
 
-func (self *client) splitRequestBytes(buffer []byte) error {
-	for snd := 0; snd < len(buffer); {
-		s, err := self.target.Write(buffer[snd : snd+PACKET_SPLIT_SIZE])
+func (self *client) splitRequestBytes(buffer []byte, splitSize int) error {
+	bLen := len(buffer)
+	if splitSize > bLen {
+		splitSize = bLen
+	}
+
+	for snd := 0; snd < bLen; {
+		s, err := self.target.Write(buffer[snd:splitSize])
 		if err != nil {
 			return err
 		}
 
+		if s == 0 {
+			break
+		}
+
 		snd += s
+		splitSize += snd
+		if splitSize > bLen {
+			splitSize -= (splitSize - bLen)
+		}
 	}
 
 	return nil
