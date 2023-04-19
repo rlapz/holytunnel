@@ -56,12 +56,7 @@ func (self *httpHeader) parse(buffer []byte) error {
 		return ErrHttpHeaderInval
 	}
 
-	fbHost += len(hdHost)
-	if fbHost >= len(buffer) {
-		return ErrHttpHeaderInval
-	}
-
-	bufHostPort := buffer[fbHost+fbEnd:]
+	bufHostPort := buffer[fbHost+fbEnd+len(hdHost):]
 	fbHostEnd := bytes.Index(bufHostPort, []byte("\r\n"))
 	if fbHostEnd < 0 {
 		return ErrHttpHeaderInval
@@ -79,7 +74,7 @@ func (self *httpHeader) parse(buffer []byte) error {
 		}
 	} else {
 		// IPv6
-		if bytes.LastIndex(hostPort[idxIPv6End:], []byte(":")) == -1 {
+		if bytes.Index(hostPort[idxIPv6End:], []byte(":")) == -1 {
 			sHostPort = self.addPort(sHostPort)
 		}
 	}
