@@ -175,8 +175,13 @@ func (self *client) handle() {
 
 func (self *client) handleHTTP(header *httpHeader, buffer []byte) error {
 	// send the first bytes
-	if err := self.splitRequestBytes(buffer); err != nil {
-		return err
+	for snt := 0; snt < len(buffer); {
+		s, err := self.target.Write(buffer[snt:])
+		if err != nil {
+			return err
+		}
+
+		snt += s
 	}
 
 	// forward all traffics
