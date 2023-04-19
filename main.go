@@ -12,20 +12,20 @@ import (
 
 const (
 	BUFFER_SIZE            = 8192
-	HTTPS_HELO_SIZE        = 256 // TODO: correct HTTPS HELO packet size
-	HTTPS_HELO_SPLIT_SIZE  = 64
+	HTTPS_HELO_SPLIT_SIZE  = 128
 	HTTP_HEADER_SPLIT_SIZE = 4
 )
 
 /*
  * Http header
  */
+var ErrHttpHeaderInval = errors.New("invalid http header")
+
 type httpHeader struct {
 	hostPort         string
+	method           string
 	hasConnectMethod bool
 }
-
-var ErrHttpHeaderInval = errors.New("invalid http header")
 
 func (self *httpHeader) parse(buffer []byte) error {
 	buffEndIdx := bytes.Index(buffer, []byte("\r\n\r\n"))
@@ -36,28 +36,26 @@ func (self *httpHeader) parse(buffer []byte) error {
 	// update buffer offset
 	buffer = buffer[:buffEndIdx]
 
-	reqEnd := bytes.Index(buffer, []byte("\r\n"))
-	if reqEnd < 0 {
-		return ErrHttpHeaderInval
-	}
-
 	// finding method type
-	methodEndIdx := bytes.Index(buffer[:reqEnd], []byte(" "))
+	methodEndIdx := bytes.Index(buffer, []byte(" "))
 	if methodEndIdx < 0 {
 		return ErrHttpHeaderInval
 	}
 
-	method := bytes.ToUpper(bytes.Trim(buffer[:methodEndIdx], " "))
-	if bytes.Equal(method, []byte("CONNECT")) {
+	method := string(bytes.ToUpper(bytes.TrimSpace(buffer[:methodEndIdx])))
+	if method == "CONNECT" {
 		self.hasConnectMethod = true
 	} else {
 		self.hasConnectMethod = false
 	}
 
+	self.method = method
+
 	// update buffer offset
-	buffer = buffer[reqEnd+2:]
+	buffer = buffer[methodEndIdx+len(method):]
 
 	// finding host:port
+	// TODO: case insensitive comparison
 	keyHost := []byte("Host:")
 	valHostIdx := bytes.Index(buffer, keyHost)
 	if valHostIdx < 0 {
@@ -70,21 +68,17 @@ func (self *httpHeader) parse(buffer []byte) error {
 		valHostEndIdx = len(valHost)
 	}
 
-	hostPort := bytes.Trim(valHost[:valHostEndIdx], " ")
+	hostPort := bytes.TrimSpace(valHost[:valHostEndIdx])
 	hostPortStr := string(hostPort)
 
-	// check ip version
+	// check IPv6 version
 	ipv6Idx := bytes.Index(hostPort, []byte("]"))
-	if ipv6Idx < 0 {
-		// IPv4
-		if !bytes.Contains(hostPort, []byte(":")) {
-			hostPortStr = self.addPort(hostPortStr)
-		}
-	} else {
-		// IPv6
-		if bytes.Index(hostPort[ipv6Idx:], []byte(":")) == -1 {
-			hostPortStr = self.addPort(hostPortStr)
-		}
+	if ipv6Idx != -1 {
+		hostPort = hostPort[ipv6Idx:]
+	}
+
+	if !bytes.Contains(hostPort, []byte(":")) {
+		hostPortStr = self.addPort(hostPortStr)
 	}
 
 	self.hostPort = hostPortStr
@@ -126,8 +120,9 @@ func runServer(address string) error {
  * Client
  */
 type client struct {
-	source net.Conn
-	target net.Conn
+	source     net.Conn
+	target     net.Conn
+	httpHeader httpHeader
 }
 
 func NewClient(conn net.Conn) *client {
@@ -139,17 +134,14 @@ func NewClient(conn net.Conn) *client {
 func (self *client) handle() {
 	defer self.source.Close()
 
+	var realBuffer [BUFFER_SIZE]byte
 	var rAddr = self.source.RemoteAddr()
-	var buffer [BUFFER_SIZE]byte
-	var header httpHeader
+	var header = &self.httpHeader
+	var buffer = realBuffer[:]
 
 	// TODO: handle big request header
-	recvd, err := self.source.Read(buffer[:])
+	recvd, err := self.source.Read(buffer)
 	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return
-		}
-
 		log.Printf("Error: conn.Read: source: %s: %s\n", rAddr, err)
 		return
 	}
@@ -167,70 +159,42 @@ func (self *client) handle() {
 	}
 	defer self.target.Close()
 
-	log.Printf("%s -> %s\n", rAddr, header.hostPort)
-	if header.hasConnectMethod {
-		if err = self.handleHTTPS(&header, buffer[:]); err != nil {
-			log.Printf("Error: handleHTTPS: %s -> %s: %s\n", rAddr,
-				header.hostPort, err)
-		}
-	} else {
-		if err = self.handleHTTP(&header, buffer[:recvd]); err != nil {
-			log.Printf("Error: handleHTTPS: %s -> %s: %s\n", rAddr,
-				header.hostPort, err)
-		}
+	log.Printf("%s -> %s %s\n", rAddr, header.method, header.hostPort)
+	if err = self.nextState(buffer, recvd); err != nil {
+		log.Printf("Error: %s -> %s: %s\n", rAddr, header.hostPort, err)
 	}
 }
 
-func (self *client) handleHTTP(header *httpHeader, buffer []byte) error {
-	// send the first bytes
-	err := self.splitRequestBytes(buffer, HTTP_HEADER_SPLIT_SIZE)
-	if err != nil {
+func (self *client) nextState(buffer []byte, offset int) error {
+	var err error
+	var splitSize = HTTP_HEADER_SPLIT_SIZE
+
+	// HTTPS handler
+	if self.httpHeader.hasConnectMethod {
+		// send established tunneling status
+		req := []byte("HTTP/1.1 200 OK\r\n\r\n")
+		if _, err = self.source.Write(req); err != nil {
+			return err
+		}
+
+		// Read HTTPS HELO packet and update `offset` value
+		if offset, err = self.source.Read(buffer[:]); err != nil {
+			return err
+		}
+
+		splitSize = HTTPS_HELO_SPLIT_SIZE
+	}
+
+	if err = self.writeSplitRequest(buffer[:offset], splitSize); err != nil {
 		return err
 	}
 
-	// forward all traffics
-	self.forwardAll()
+	self.spliceConnection()
 	return nil
 }
 
-func (self *client) handleHTTPS(header *httpHeader, buffer []byte) error {
-	// send established tunneling status
-	resp := []byte("HTTP/1.1 200 OK\r\n\r\n")
-	if err := writeAllBytes(self.source, resp); err != nil {
-		return err
-	}
-
-	// Read HTTPS HELO packet
-	rd, err := self.source.Read(buffer[:HTTPS_HELO_SIZE])
-	if err != nil {
-		return err
-	}
-
-	// "intercepts" and forward HTTPS HELO packet
-	err = self.splitRequestBytes(buffer[:rd], HTTPS_HELO_SPLIT_SIZE)
-	if err != nil {
-		return err
-	}
-
-	// forward all traffics
-	self.forwardAll()
-	return nil
-}
-
-func (self *client) forwardAll() {
-	go func() {
-		io.Copy(self.target, self.source)
-	}()
-
-	io.Copy(self.source, self.target)
-}
-
-func (self *client) splitRequestBytes(buffer []byte, splitSize int) error {
+func (self *client) writeSplitRequest(buffer []byte, splitSize int) error {
 	bLen := len(buffer)
-	if splitSize > bLen {
-		splitSize = bLen
-	}
-
 	for snd := 0; snd < bLen; {
 		s, err := self.target.Write(buffer[snd:splitSize])
 		if err != nil {
@@ -251,17 +215,12 @@ func (self *client) splitRequestBytes(buffer []byte, splitSize int) error {
 	return nil
 }
 
-func writeAllBytes(conn net.Conn, buffer []byte) error {
-	for sent := 0; sent < len(buffer); {
-		w, err := conn.Write(buffer[sent:])
-		if err != nil {
-			return err
-		}
+func (self *client) spliceConnection() {
+	go func() {
+		io.Copy(self.target, self.source)
+	}()
 
-		sent += w
-	}
-
-	return nil
+	io.Copy(self.source, self.target)
 }
 
 func main() {
