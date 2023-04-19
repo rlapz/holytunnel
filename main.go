@@ -130,7 +130,7 @@ func (self *client) handle() {
 	// TODO: handle big request header
 	recvd, err := self.source.Read(buffer[:])
 	if err != nil {
-		if !errors.Is(err, io.EOF) {
+		if errors.Is(err, io.EOF) {
 			return
 		}
 
