@@ -85,6 +85,7 @@ func (self *httpRequest) parseHostPort(buffer []byte) error {
 	}
 
 	hostPort := bytes.TrimSpace(valHost[:valHostEndIdx])
+	hostPortStr := string(hostPort)
 
 	// check IPv6 version
 	ipv6Idx := bytes.Index(hostPort, []byte("]"))
@@ -92,15 +93,15 @@ func (self *httpRequest) parseHostPort(buffer []byte) error {
 		hostPort = hostPort[ipv6Idx:]
 	}
 
-	self.hostPort = string(hostPort)
 	if !bytes.Contains(hostPort, []byte(":")) {
 		if self.hasConnectMethod {
-			self.hostPort += ":443"
+			hostPortStr += ":443"
 		} else {
-			self.hostPort += ":80"
+			hostPortStr += ":80"
 		}
 	}
 
+	self.hostPort = hostPortStr
 	return nil
 }
 
