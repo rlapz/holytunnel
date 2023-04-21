@@ -7,7 +7,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
+	"strings"
 )
 
 const (
@@ -17,49 +19,63 @@ const (
 )
 
 /*
- * Http header
+ * HTTP Request Handler
  */
-var ErrHttpHeaderInval = errors.New("invalid http header")
+var errHttpRequestInval = errors.New("invalid http request")
 
-type httpHeader struct {
-	hostPort         string
+type httpRequest struct {
 	method           string
+	path             string
+	version          string
+	hostPort         string
 	hasConnectMethod bool
 }
 
-func (self *httpHeader) parse(buffer []byte) error {
-	buffEndIdx := bytes.Index(buffer, []byte("\r\n\r\n"))
-	if buffEndIdx < 0 {
-		return ErrHttpHeaderInval
+func (self *httpRequest) parse(buffer []byte) error {
+	reqLineEndIdx, err := self.parseRequestLine(buffer)
+	if err != nil {
+		return err
 	}
 
-	// update buffer offset
-	buffer = buffer[:buffEndIdx]
-
-	// finding method type
-	methodEndIdx := bytes.Index(buffer, []byte(" "))
-	if methodEndIdx < 0 {
-		return ErrHttpHeaderInval
+	err = self.parseHostPort(buffer[reqLineEndIdx:])
+	if err != nil {
+		return err
 	}
 
-	method := string(bytes.ToUpper(bytes.TrimSpace(buffer[:methodEndIdx])))
-	if method == "CONNECT" {
+	return nil
+}
+
+func (self *httpRequest) parseRequestLine(buffer []byte) (int, error) {
+	reqLineEndIdx := bytes.Index(buffer, []byte("\r\n"))
+	if reqLineEndIdx < 0 {
+		return -1, errHttpRequestInval
+	}
+
+	// TODO: carefully handle whitespaces
+	split := bytes.Split(buffer[:reqLineEndIdx], []byte(" "))
+	if len(split) != 3 {
+		return -1, errHttpRequestInval
+	}
+
+	self.method = string(split[0])
+	self.path = string(split[1])
+	self.version = string(split[2])
+
+	if strings.ToUpper(self.method) == "CONNECT" {
 		self.hasConnectMethod = true
 	} else {
 		self.hasConnectMethod = false
 	}
 
-	self.method = method
+	return reqLineEndIdx, nil
+}
 
-	// update buffer offset
-	buffer = buffer[methodEndIdx+len(method):]
-
-	// finding host:port
-	// TODO: case insensitive comparison
+func (self *httpRequest) parseHostPort(buffer []byte) error {
+	// TODO: handle case insensitive
 	keyHost := []byte("Host:")
 	valHostIdx := bytes.Index(buffer, keyHost)
 	if valHostIdx < 0 {
-		return ErrHttpHeaderInval
+		return errHttpRequestInval
 	}
 
 	valHost := buffer[valHostIdx+len(keyHost):]
@@ -69,7 +85,6 @@ func (self *httpHeader) parse(buffer []byte) error {
 	}
 
 	hostPort := bytes.TrimSpace(valHost[:valHostEndIdx])
-	hostPortStr := string(hostPort)
 
 	// check IPv6 version
 	ipv6Idx := bytes.Index(hostPort, []byte("]"))
@@ -77,22 +92,36 @@ func (self *httpHeader) parse(buffer []byte) error {
 		hostPort = hostPort[ipv6Idx:]
 	}
 
+	self.hostPort = string(hostPort)
 	if !bytes.Contains(hostPort, []byte(":")) {
-		hostPortStr = self.addPort(hostPortStr)
+		if self.hasConnectMethod {
+			self.hostPort += ":443"
+		} else {
+			self.hostPort += ":80"
+		}
 	}
 
-	self.hostPort = hostPortStr
 	return nil
 }
 
-func (self *httpHeader) addPort(buffer string) string {
-	if self.hasConnectMethod {
-		buffer += ":443"
-	} else {
-		buffer += ":80"
+func (self *httpRequest) newHttpRequest(buffer []byte) ([]byte, error) {
+	reqLineEndIdx := bytes.Index(buffer, []byte("\r\n"))
+	if reqLineEndIdx < 0 {
+		return nil, errHttpRequestInval
 	}
 
-	return buffer
+	u, err := url.Parse(self.path)
+	if err != nil {
+		return nil, err
+	}
+
+	newReqLine := fmt.Sprintf("%s %s %s", self.method, u.Path, self.version)
+	newReqLineLen := len(newReqLine)
+	newBuff := make([]byte, newReqLineLen+(len(buffer)-reqLineEndIdx))
+
+	copy(newBuff, newReqLine)
+	copy(newBuff[newReqLineLen:], buffer[reqLineEndIdx:])
+	return newBuff, nil
 }
 
 /*
@@ -120,9 +149,9 @@ func runServer(address string) error {
  * Client
  */
 type client struct {
-	source     net.Conn
-	target     net.Conn
-	httpHeader httpHeader
+	source  net.Conn
+	target  net.Conn
+	request httpRequest
 }
 
 func NewClient(conn net.Conn) *client {
@@ -136,7 +165,7 @@ func (self *client) handle() {
 
 	var realBuffer [BUFFER_SIZE]byte
 	var rAddr = self.source.RemoteAddr()
-	var header = &self.httpHeader
+	var req = &self.request
 	var buffer = realBuffer[:]
 
 	// TODO: handle big request header
@@ -146,46 +175,71 @@ func (self *client) handle() {
 		return
 	}
 
-	if err = header.parse(buffer[:recvd]); err != nil {
-		log.Printf("Error: header.parse: %s: %s\n", rAddr, err)
+	reqBufferIndex := bytes.Index(buffer[:recvd], []byte("\r\n\r\n"))
+	if reqBufferIndex < 0 {
+		log.Printf("Error: %s: %s\n", rAddr, errHttpRequestInval)
+		return
+	}
+
+	if err = req.parse(buffer[:reqBufferIndex]); err != nil {
+		log.Printf("Error: httpRequest.parse: %s: %s\n", rAddr, err)
 		return
 	}
 
 	// connect to the target host
-	self.target, err = net.Dial("tcp", header.hostPort)
+	self.target, err = net.Dial("tcp", req.hostPort)
 	if err != nil {
 		log.Printf("Error: net.Dial: target: %s: %s\n", rAddr, err)
 		return
 	}
 	defer self.target.Close()
 
-	log.Printf("%s -> %s %s\n", rAddr, header.method, header.hostPort)
-	if err = self.nextState(buffer, recvd); err != nil {
-		log.Printf("Error: %s -> %s: %s\n", rAddr, header.hostPort, err)
+	log.Printf("%s -> %s %s\n", rAddr, req.method, req.hostPort)
+	if req.hasConnectMethod {
+		// HTTPS
+		err = self.handleHttps(buffer)
+	} else {
+		// HTTP
+		// update http request (buffer), handle absolute path
+		buffer, err = req.newHttpRequest(buffer[:recvd])
+		if err != nil {
+			log.Printf("Error: request.newHttpRequest: %s: %s\n", rAddr, err)
+			return
+		}
+
+		err = self.handleHttp(buffer)
+	}
+
+	if err != nil {
+		log.Printf("Error: %s -> %s: %s\n", rAddr, req.hostPort, err)
 	}
 }
 
-func (self *client) nextState(buffer []byte, offset int) error {
-	var err error
-	var splitSize = HTTP_HEADER_SPLIT_SIZE
-
-	// HTTPS handler
-	if self.httpHeader.hasConnectMethod {
-		// send established tunneling status
-		req := []byte("HTTP/1.1 200 OK\r\n\r\n")
-		if _, err = self.source.Write(req); err != nil {
-			return err
-		}
-
-		// Read HTTPS HELO packet and update `offset` value
-		if offset, err = self.source.Read(buffer[:]); err != nil {
-			return err
-		}
-
-		splitSize = HTTPS_HELO_SPLIT_SIZE
+func (self *client) handleHttp(buffer []byte) error {
+	err := self.writeSplitRequest(buffer, HTTP_HEADER_SPLIT_SIZE)
+	if err != nil {
+		return err
 	}
 
-	if err = self.writeSplitRequest(buffer[:offset], splitSize); err != nil {
+	self.spliceConnection()
+	return nil
+}
+
+func (self *client) handleHttps(buffer []byte) error {
+	// send established tunneling status
+	req := []byte("HTTP/1.1 200 OK\r\n\r\n")
+	if _, err := self.source.Write(req); err != nil {
+		return err
+	}
+
+	// Read HTTPS HELO packet and update `offset` value
+	offset, err := self.source.Read(buffer)
+	if err != nil {
+		return err
+	}
+
+	err = self.writeSplitRequest(buffer[:offset], HTTPS_HELO_SPLIT_SIZE)
+	if err != nil {
 		return err
 	}
 
