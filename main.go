@@ -37,13 +37,19 @@ func (self *httpRequest) parse(buffer []byte) error {
 		return err
 	}
 
-	return self.parseHostPort(buffer[reqLineEndIdx:])
+	err = self.parseHostPort(buffer[reqLineEndIdx:])
+	if err != nil {
+		return err
+	}
+
+	self.addPort()
+	return nil
 }
 
 func (self *httpRequest) parseRequestLine(buffer []byte) (int, error) {
 	reqLineEndIdx := bytes.Index(buffer, []byte("\r\n"))
 	if reqLineEndIdx < 0 {
-		return -1, errHttpRequestInval
+		reqLineEndIdx = len(buffer)
 	}
 
 	// TODO: carefully handle whitespaces
@@ -70,7 +76,9 @@ func (self *httpRequest) parseHostPort(buffer []byte) error {
 	keyHost := []byte("Host:")
 	valHostIdx := bytes.Index(buffer, keyHost)
 	if valHostIdx < 0 {
-		return errHttpRequestInval
+		// some request doesn't have `Host` property
+		self.hostPort = self.path
+		return nil
 	}
 
 	valHost := buffer[valHostIdx+len(keyHost):]
@@ -80,7 +88,6 @@ func (self *httpRequest) parseHostPort(buffer []byte) error {
 	}
 
 	hostPort := bytes.TrimSpace(valHost[:valHostEndIdx])
-	hostPortStr := string(hostPort)
 
 	// check IPv6 version
 	ipv6Idx := bytes.Index(hostPort, []byte("]"))
@@ -88,16 +95,21 @@ func (self *httpRequest) parseHostPort(buffer []byte) error {
 		hostPort = hostPort[ipv6Idx:]
 	}
 
-	if !bytes.Contains(hostPort, []byte(":")) {
+	self.hostPort = string(hostPort)
+	return nil
+}
+
+func (self *httpRequest) addPort() {
+	var hostPort = self.hostPort
+	if !strings.Contains(hostPort, ":") {
 		if self.hasConnectMethod {
-			hostPortStr += ":443"
+			hostPort += ":443"
 		} else {
-			hostPortStr += ":80"
+			hostPort += ":80"
 		}
 	}
 
-	self.hostPort = hostPortStr
-	return nil
+	self.hostPort = hostPort
 }
 
 func (self *httpRequest) newHttpRequest(buffer []byte) ([]byte, error) {
@@ -173,13 +185,13 @@ func (self *client) handle() {
 		return
 	}
 
-	reqBufferIndex := bytes.Index(buffer[:recvd], []byte("\r\n\r\n"))
-	if reqBufferIndex < 0 {
+	reqEndIdx := bytes.Index(buffer[:recvd], []byte("\r\n\r\n"))
+	if reqEndIdx < 0 {
 		log.Printf("Error: %s: %s\n", rAddr, errHttpRequestInval)
 		return
 	}
 
-	if err = req.parse(buffer[:reqBufferIndex]); err != nil {
+	if err = req.parse(buffer[:reqEndIdx]); err != nil {
 		log.Printf("Error: httpRequest.parse: %s: %s\n", rAddr, err)
 		return
 	}
