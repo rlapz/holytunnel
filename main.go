@@ -37,12 +37,7 @@ func (self *httpRequest) parse(buffer []byte) error {
 		return err
 	}
 
-	err = self.parseHostPort(buffer[reqLineEndIdx:])
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return self.parseHostPort(buffer[reqLineEndIdx:])
 }
 
 func (self *httpRequest) parseRequestLine(buffer []byte) (int, error) {
@@ -134,6 +129,8 @@ func runServer(address string) error {
 		return err
 	}
 	defer listener.Close()
+
+	log.Println("Listening on:", address)
 
 	for {
 		sourceConn, err := listener.Accept()
