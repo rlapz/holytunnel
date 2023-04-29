@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 )
 
 const (
@@ -62,17 +63,20 @@ func (self *httpRequest) parse(buffer []byte) error {
 	self.path = path
 	self.version = req.Proto
 
-	host, port, err := net.SplitHostPort(req.Host)
-	if err != nil {
-		host = req.Host
-		if self.hasConnectMethod {
-			port = "443"
-		} else {
-			port = "80"
-		}
+	startIdx := strings.Index(req.Host, "]") // IPv6
+	if startIdx < 0 {
+		startIdx = 0
 	}
 
-	self.hostPort = host + ":" + port
+	self.hostPort = req.Host
+	if !strings.Contains(req.Host[startIdx:], ":") {
+		// need port
+		if self.hasConnectMethod {
+			self.hostPort += ":443"
+		} else {
+			self.hostPort += ":80"
+		}
+	}
 
 	req.Body.Close()
 	return nil
@@ -151,13 +155,7 @@ func (self *client) handle() {
 		return
 	}
 
-	reqEndIdx := bytes.Index(buffer[:recvd], []byte("\r\n\r\n"))
-	if reqEndIdx < 0 {
-		log.Printf("Error: %s: %s\n", rAddr, errHttpRequestInval)
-		return
-	}
-
-	if err = req.parse(buffer[:reqEndIdx+4]); err != nil {
+	if err = req.parse(buffer); err != nil {
 		log.Printf("Error: httpRequest.parse: %s: %s\n", rAddr, err)
 		return
 	}
