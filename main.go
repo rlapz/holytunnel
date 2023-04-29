@@ -1,15 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
-	"strings"
 )
 
 const (
@@ -32,84 +33,49 @@ type httpRequest struct {
 }
 
 func (self *httpRequest) parse(buffer []byte) error {
-	reqLineEndIdx, err := self.parseRequestLine(buffer)
+	rd := bufio.NewReader(bytes.NewReader(buffer))
+	req, err := http.ReadRequest(rd)
 	if err != nil {
 		return err
 	}
 
-	err = self.parseHostPort(buffer[reqLineEndIdx:])
-	if err != nil {
-		return err
-	}
-
-	self.addPort()
-	return nil
-}
-
-func (self *httpRequest) parseRequestLine(buffer []byte) (int, error) {
-	reqLineEndIdx := bytes.Index(buffer, []byte("\r\n"))
-	if reqLineEndIdx < 0 {
-		reqLineEndIdx = len(buffer)
-	}
-
-	// TODO: carefully handle whitespaces
-	split := bytes.Split(buffer[:reqLineEndIdx], []byte(" "))
-	if len(split) != 3 {
-		return -1, errHttpRequestInval
-	}
-
-	self.method = string(split[0])
-	self.path = string(split[1])
-	self.version = string(split[2])
-
-	if strings.ToUpper(self.method) == "CONNECT" {
+	self.method = req.Method
+	if self.method == "CONNECT" {
 		self.hasConnectMethod = true
 	} else {
 		self.hasConnectMethod = false
 	}
 
-	return reqLineEndIdx, nil
-}
-
-func (self *httpRequest) parseHostPort(buffer []byte) error {
-	// TODO: handle case insensitive
-	keyHost := []byte("Host:")
-	valHostIdx := bytes.Index(buffer, keyHost)
-	if valHostIdx < 0 {
-		// some request doesn't have `Host` property
-		self.hostPort = self.path
-		return nil
+	var path = "/"
+	if req.URL.Path != "" {
+		path = req.URL.Path
 	}
 
-	valHost := buffer[valHostIdx+len(keyHost):]
-	valHostEndIdx := bytes.Index(valHost, []byte("\r\n"))
-	if valHostEndIdx < 0 {
-		valHostEndIdx = len(valHost)
+	if req.URL.RawQuery != "" {
+		path += "?" + req.URL.RawQuery
 	}
 
-	hostPort := bytes.TrimSpace(valHost[:valHostEndIdx])
-
-	// check IPv6 version
-	ipv6Idx := bytes.Index(hostPort, []byte("]"))
-	if ipv6Idx != -1 {
-		hostPort = hostPort[ipv6Idx:]
+	if req.URL.RawFragment != "" {
+		path += "#" + req.URL.RawFragment
 	}
 
-	self.hostPort = string(hostPort)
-	return nil
-}
+	self.path = path
+	self.version = req.Proto
 
-func (self *httpRequest) addPort() {
-	var hostPort = self.hostPort
-	if !strings.Contains(hostPort, ":") {
+	host, port, err := net.SplitHostPort(req.Host)
+	if err != nil {
+		host = req.Host
 		if self.hasConnectMethod {
-			hostPort += ":443"
+			port = "443"
 		} else {
-			hostPort += ":80"
+			port = "80"
 		}
 	}
 
-	self.hostPort = hostPort
+	self.hostPort = host + ":" + port
+
+	req.Body.Close()
+	return nil
 }
 
 func (self *httpRequest) newHttpRequest(buffer []byte) ([]byte, error) {
@@ -191,7 +157,7 @@ func (self *client) handle() {
 		return
 	}
 
-	if err = req.parse(buffer[:reqEndIdx]); err != nil {
+	if err = req.parse(buffer[:reqEndIdx+4]); err != nil {
 		log.Printf("Error: httpRequest.parse: %s: %s\n", rAddr, err)
 		return
 	}
