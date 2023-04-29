@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 )
 
@@ -78,26 +77,6 @@ func (self *httpRequest) parse(buffer []byte) error {
 	return nil
 }
 
-func (self *httpRequest) newHttpRequest(buffer []byte) ([]byte, error) {
-	reqLineEndIdx := bytes.Index(buffer, []byte("\r\n"))
-	if reqLineEndIdx < 0 {
-		return nil, errHttpRequestInval
-	}
-
-	u, err := url.Parse(self.path)
-	if err != nil {
-		return nil, err
-	}
-
-	newReqLine := fmt.Sprintf("%s %s %s", self.method, u.Path, self.version)
-	newReqLineLen := len(newReqLine)
-	newBuff := make([]byte, newReqLineLen+(len(buffer)-reqLineEndIdx))
-
-	copy(newBuff, newReqLine)
-	copy(newBuff[newReqLineLen:], buffer[reqLineEndIdx:])
-	return newBuff, nil
-}
-
 /*
  * Server
  */
@@ -151,13 +130,7 @@ func (self *client) handle() {
 		return
 	}
 
-	reqEndIdx := bytes.Index(buffer[:recvd], []byte("\r\n\r\n"))
-	if reqEndIdx < 0 {
-		log.Printf("Error: %s: %s\n", rAddr, errHttpRequestInval)
-		return
-	}
-
-	if err = req.parse(buffer[:reqEndIdx+4]); err != nil {
+	if err = req.parse(buffer); err != nil {
 		log.Printf("Error: httpRequest.parse: %s: %s\n", rAddr, err)
 		return
 	}
@@ -176,14 +149,7 @@ func (self *client) handle() {
 		err = self.handleHttps(buffer)
 	} else {
 		// HTTP
-		// update http request (buffer), handle absolute path
-		buffer, err = req.newHttpRequest(buffer[:recvd])
-		if err != nil {
-			log.Printf("Error: request.newHttpRequest: %s: %s\n", rAddr, err)
-			return
-		}
-
-		err = self.handleHttp(buffer)
+		err = self.handleHttp(buffer[:recvd])
 	}
 
 	if err != nil {
