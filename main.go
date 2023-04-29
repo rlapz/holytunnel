@@ -47,20 +47,19 @@ func (self *httpRequest) parse(buffer []byte) error {
 		self.hasConnectMethod = false
 	}
 
-	var path = "/"
-	if req.URL.Path != "" {
-		path = req.URL.Path
-	}
-
+	self.path = req.URL.Path
 	if req.URL.RawQuery != "" {
-		path += "?" + req.URL.RawQuery
+		self.path += "?" + req.URL.RawQuery
 	}
 
 	if req.URL.RawFragment != "" {
-		path += "#" + req.URL.RawFragment
+		self.path += "#" + req.URL.RawFragment
 	}
 
-	self.path = path
+	if self.path == "" {
+		self.path = "/"
+	}
+
 	self.version = req.Proto
 
 	startIdx := strings.Index(req.Host, "]") // IPv6
