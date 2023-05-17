@@ -21,6 +21,17 @@ const (
 )
 
 /*
+ * Log wrapper
+ */
+func info(format string, v ...any) {
+	log.Printf("[INFO]: "+format+"\n", v...)
+}
+
+func perror(format string, v ...any) {
+	log.Printf("[ERROR]: "+format+"\n", v...)
+}
+
+/*
  * HTTP Request Handler
  */
 var errHttpRequestInval = errors.New("invalid http request")
@@ -109,12 +120,11 @@ func runServer(address string) error {
 	}
 	defer listener.Close()
 
-	log.Println("Listening on:", address)
-
+	info("Listening on: %v", address)
 	for {
 		sourceConn, err := listener.Accept()
 		if err != nil {
-			log.Println("Cannot accept a new client:", err.Error())
+			perror("Cannot accept a new client: %s", err.Error())
 			continue
 		}
 
@@ -148,24 +158,24 @@ func (self *client) handle() {
 	// TODO: handle big request header
 	recvd, err := self.source.Read(buffer)
 	if err != nil {
-		log.Printf("Error: conn.Read: source: %s: %s\n", rAddr, err)
+		perror("Error: conn.Read: source: %s: %s", rAddr, err)
 		return
 	}
 
 	if err = req.parse(buffer); err != nil {
-		log.Printf("Error: httpRequest.parse: %s: %s\n", rAddr, err)
+		perror("Error: httpRequest.parse: %s: %s", rAddr, err)
 		return
 	}
 
 	// connect to the target host
 	self.target, err = net.Dial("tcp", req.hostPort)
 	if err != nil {
-		log.Printf("Error: net.Dial: target: %s: %s\n", rAddr, err)
+		perror("Error: net.Dial: target: %s: %s", rAddr, err)
 		return
 	}
 	defer self.target.Close()
 
-	log.Printf("%s -> %s %s\n", rAddr, req.method, req.hostPort)
+	info("%s -> %s %s", rAddr, req.method, req.hostPort)
 	if req.hasConnectMethod {
 		// HTTPS
 		err = self.handleHttps(buffer)
@@ -174,7 +184,7 @@ func (self *client) handle() {
 		// update http request (buffer), handle absolute path
 		buffer, err = req.newHttpRequest(buffer[:recvd])
 		if err != nil {
-			log.Printf("Error: request.newHttpRequest: %s: %s\n", rAddr, err)
+			perror("Error: request.newHttpRequest: %s: %s", rAddr, err)
 			return
 		}
 
@@ -182,7 +192,7 @@ func (self *client) handle() {
 	}
 
 	if err != nil {
-		log.Printf("Error: %s -> %s: %s\n", rAddr, req.hostPort, err)
+		perror("Error: %s -> %s: %s", rAddr, req.hostPort, err)
 	}
 }
 
@@ -252,26 +262,18 @@ const helpMsg = "holytunnel [HOST:PORT]"
 
 func main() {
 	args := os.Args
-
-	var errMsg string
 	if len(args) < 2 {
-		errMsg = "Not enough argument!\n" + helpMsg
-		goto err0
+		fmt.Println("Not enough argument!\n" + helpMsg)
+		os.Exit(1)
 	}
 
 	if len(args) > 2 {
-		errMsg = "Invalid argument!\n" + helpMsg
-		goto err0
+		fmt.Println("Invalid argument!\n" + helpMsg)
+		os.Exit(1)
 	}
 
 	if err := runServer(args[1]); err != nil {
-		errMsg = err.Error()
-		goto err0
+		perror(err.Error())
+		os.Exit(1)
 	}
-
-	return
-
-err0:
-	fmt.Println(errMsg)
-	os.Exit(1)
 }
