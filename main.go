@@ -159,19 +159,19 @@ func (self *client) handle() {
 	// TODO: handle big request header
 	recvd, err := self.source.Read(buffer)
 	if err != nil {
-		perror("Error: conn.Read: source: %s: %s", rAddr, err)
+		perror("conn.Read: %s: %s", rAddr, err)
 		return
 	}
 
 	if err = req.parse(buffer); err != nil {
-		perror("Error: httpRequest.parse: %s: %s", rAddr, err)
+		perror("httpRequest.parse: %s: %s", rAddr, err)
 		return
 	}
 
 	// connect to the target host
 	self.target, err = net.Dial("tcp", req.hostPort)
 	if err != nil {
-		perror("Error: net.Dial: target: %s: %s", rAddr, err)
+		perror("net.Dial: %s: %s", rAddr, err)
 		return
 	}
 	defer self.target.Close()
@@ -185,7 +185,7 @@ func (self *client) handle() {
 		// update http request (buffer), handle absolute path
 		buffer, err = req.newHttpRequest(buffer[:recvd])
 		if err != nil {
-			perror("Error: request.newHttpRequest: %s: %s", rAddr, err)
+			perror("request.newHttpRequest: %s: %s", rAddr, err)
 			return
 		}
 
@@ -193,7 +193,7 @@ func (self *client) handle() {
 	}
 
 	if err != nil {
-		perror("Error: %s -> %s: %s", rAddr, req.hostPort, err)
+		perror("%s -> %s: %s", rAddr, req.hostPort, err)
 	}
 }
 
