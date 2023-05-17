@@ -93,12 +93,10 @@ func (self *httpRequest) newHttpRequest(buffer []byte) ([]byte, error) {
 	}
 
 	newReqLine := fmt.Sprintf("%s %s %s", self.method, u.Path, self.version)
-	newReqLineLen := len(newReqLine)
-	newBuff := make([]byte, newReqLineLen+(len(buffer)-reqLineEndIdx))
+	ret := buffer[reqLineEndIdx-len(newReqLine):]
 
-	copy(newBuff, newReqLine)
-	copy(newBuff[newReqLineLen:], buffer[reqLineEndIdx:])
-	return newBuff, nil
+	copy(ret, newReqLine)
+	return ret, nil
 }
 
 /*
