@@ -263,10 +263,11 @@ func (self *client) spliceConnection() {
 const helpMsg = "holytunnel [HOST:PORT]"
 
 func main() {
+	var hostPort = "127.0.0.1:8001"
+
 	args := os.Args
 	if len(args) < 2 {
-		fmt.Println("Not enough argument!\n" + helpMsg)
-		os.Exit(1)
+		goto run
 	}
 
 	if len(args) > 2 {
@@ -274,7 +275,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := runServer(args[1]); err != nil {
+	hostPort = args[1]
+
+run:
+	if err := runServer(hostPort); err != nil {
 		perror(err.Error())
 		os.Exit(1)
 	}
