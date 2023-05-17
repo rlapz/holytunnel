@@ -248,14 +248,30 @@ func (self *client) spliceConnection() {
 	io.Copy(self.source, self.target)
 }
 
+const helpMsg = "holytunnel [HOST:PORT]"
+
 func main() {
 	args := os.Args
-	if len(args) != 2 {
-		fmt.Println("Not enough argument!\nholytunnel [HOST:PORT]")
-		os.Exit(1)
+
+	var errMsg string
+	if len(args) < 2 {
+		errMsg = "Not enough argument!\n" + helpMsg
+		goto err0
+	}
+
+	if len(args) > 2 {
+		errMsg = "Invalid argument!\n" + helpMsg
+		goto err0
 	}
 
 	if err := runServer(args[1]); err != nil {
-		log.Panicln(err)
+		errMsg = err.Error()
+		goto err0
 	}
+
+	return
+
+err0:
+	fmt.Println(errMsg)
+	os.Exit(1)
 }
