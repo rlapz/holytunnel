@@ -35,6 +35,7 @@ func perror(format string, v ...any) {
  * HTTP Request Handler
  */
 var errHttpRequestInval = errors.New("invalid http request")
+var resHttpOk = []byte("HTTP/1.1 200 OK\r\n\r\n")
 
 type httpRequest struct {
 	method           string
@@ -208,8 +209,7 @@ func (self *client) handleHttp(buffer []byte) error {
 
 func (self *client) handleHttps(buffer []byte) error {
 	// send established tunneling status
-	req := []byte("HTTP/1.1 200 OK\r\n\r\n")
-	if _, err := self.source.Write(req); err != nil {
+	if _, err := self.source.Write(resHttpOk); err != nil {
 		return err
 	}
 
