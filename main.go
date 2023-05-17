@@ -52,6 +52,8 @@ func (self *httpRequest) parse(buffer []byte) error {
 		return err
 	}
 
+	defer req.Body.Close()
+
 	self.method = req.Method
 	if self.method == "CONNECT" {
 		self.hasConnectMethod = true
@@ -59,19 +61,21 @@ func (self *httpRequest) parse(buffer []byte) error {
 		self.hasConnectMethod = false
 	}
 
-	self.path = req.URL.Path
-	if req.URL.RawQuery != "" {
-		self.path += "?" + req.URL.RawQuery
+	path := req.URL.Path
+	if len(self.path) == 0 {
+		path = "/"
 	}
 
-	if req.URL.RawFragment != "" {
-		self.path += "#" + req.URL.RawFragment
+	URL := req.URL
+	if len(URL.RawQuery) > 0 {
+		path += "?" + URL.RawQuery
 	}
 
-	if self.path == "" {
-		self.path = "/"
+	if len(URL.RawFragment) > 0 {
+		path += "#" + URL.RawFragment
 	}
 
+	self.path = path
 	self.version = req.Proto
 
 	startIdx := strings.Index(req.Host, "]") // IPv6
@@ -89,7 +93,6 @@ func (self *httpRequest) parse(buffer []byte) error {
 		}
 	}
 
-	req.Body.Close()
 	return nil
 }
 
@@ -137,9 +140,8 @@ func runServer(address string) error {
  * Client
  */
 type client struct {
-	source  net.Conn
-	target  net.Conn
-	request httpRequest
+	source net.Conn
+	target net.Conn
 }
 
 func NewClient(conn net.Conn) *client {
@@ -153,7 +155,6 @@ func (self *client) handle() {
 
 	var realBuffer [BUFFER_SIZE]byte
 	var rAddr = self.source.RemoteAddr()
-	var req = &self.request
 	var buffer = realBuffer[:]
 
 	// TODO: handle big request header
@@ -163,6 +164,7 @@ func (self *client) handle() {
 		return
 	}
 
+	var req httpRequest
 	if err = req.parse(buffer); err != nil {
 		perror("httpRequest.parse: %s: %s", rAddr, err)
 		return
