@@ -189,7 +189,6 @@ _client_type_str(int type)
 }
 
 
-
 /*
  * Worker
  */
@@ -284,6 +283,9 @@ _worker_handle_client_state(Worker *w, Client *client)
 		break;
 	case _CLIENT_STATE_RESOLVER:
 		state = _worker_client_state_resolver(w, client);
+		break;
+	case _CLIENT_STATE_CONNECT:
+		state = _worker_client_state_connect(w, client);
 		break;
 	case _CLIENT_STATE_RESPONSE:
 		state = _worker_client_state_response(w, client);
@@ -585,7 +587,6 @@ _server_event_loop(Server *s)
 		short int rv = pfds[0].revents;
 		if (rv & (POLLERR | POLLHUP)) {
 			log_err(0, "holytunnel: _server_event_loop: POLLERR/POLLHUP: listen fd");
-			ret = -1;
 			goto out0;
 		}
 
@@ -595,7 +596,6 @@ _server_event_loop(Server *s)
 		rv = pfds[1].revents;
 		if (rv & (POLLERR | POLLHUP)) {
 			log_err(0, "holytunnel: _server_event_loop: POLLERR/POLLHUP: signal fd");
-			ret = -1;
 			goto out0;
 		}
 
