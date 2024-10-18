@@ -5,7 +5,7 @@
 #include "config.h"
 
 
-int holytunnel_run(Config *config);
+int holytunnel_run(const Config *config);
 
 
 #endif

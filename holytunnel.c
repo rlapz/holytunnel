@@ -124,7 +124,7 @@ static int  _server_resolver_thrd(void *udata);
  * public
  */
 int
-holytunnel_run(Config *config)
+holytunnel_run(const Config *config)
 {
 	int ret = -1;
 	Server server;
