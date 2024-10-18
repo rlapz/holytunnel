@@ -96,30 +96,30 @@ resolver_deinit(Resolver *r)
 void
 resolver_run(Resolver *r)
 {
+	int ret;
+	ResolverContext *ctx;
 	mtx_lock(&r->mutex); // LOCK
 
 	r->is_alive = 1;
 	while (r->is_alive != 0) {
 		DListNode *const node = dlist_pop(&r->req_queue);
-		if (node != NULL) {
-			mtx_lock(&r->mutex); // UNLOCK
-
-			ResolverContext *const ctx = FIELD_PARENT_PTR(ResolverContext, _node, node);
-			if (ctx->callback_fn != NULL) {
-				if (_get_address(r, ctx) < 0)
-					ctx->callback_fn(NULL, ctx->udata0, ctx->udata1);
-				else
-					ctx->callback_fn(ctx->_addr, ctx->udata0, ctx->udata1);
-			}
-
-			mtx_unlock(&r->mutex); // LOCK
+		if (node == NULL) {
+			cnd_wait(&r->condv, &r->mutex);
 			continue;
 		}
 
-		if (r->is_alive == 0)
-			break;
+		ctx = FIELD_PARENT_PTR(ResolverContext, _node, node);
+		if (ctx->callback_fn == NULL)
+			continue;
 
-		cnd_wait(&r->condv, &r->mutex);
+		ret = _get_address(r, ctx);
+
+		mtx_unlock(&r->mutex); // UNLOCK
+		if (ret < 0)
+			ctx->callback_fn(NULL, ctx->udata0, ctx->udata1);
+		else
+			ctx->callback_fn(ctx->_addr, ctx->udata0, ctx->udata1);
+		mtx_lock(&r->mutex); // LOCK
 	}
 
 	mtx_unlock(&r->mutex); // UNLOCK
@@ -142,7 +142,7 @@ int
 resolver_resolve(Resolver *r, ResolverContext *ctx)
 {
 	int ret = -1;
-	mtx_unlock(&r->mutex); // LOCK
+	mtx_lock(&r->mutex); // LOCK
 
 	if (r->is_alive == 0) {
 		log_err(0, "resolver: resolver_resolve: stopped!");

@@ -88,6 +88,7 @@ static int  _worker_client_state_response(Worker *w, Client *client);
 static int  _worker_client_state_forward_header(Worker *w, Client *client);
 static int  _worker_client_state_forward_all(Worker *w, Client *client);
 
+static int  _worker_client_blocking_send(Worker *w, Client *client);
 static void _worker_on_destroy_active_client(void *client, void *udata);
 
 

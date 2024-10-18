@@ -11,6 +11,8 @@
 #include <time.h>
 #include <threads.h>
 
+#include <sys/poll.h>
+
 #include <curl/curl.h>
 
 #include "util.h"
@@ -632,6 +634,47 @@ url_free(Url *a)
 {
 	curl_free(a->host);
 	curl_free(a->port);
+}
+
+
+/*
+ * net
+ */
+int
+net_blocking_send(int fd, const char buffer[], size_t *len, int timeout)
+{
+	struct pollfd pfd = {
+		.fd = fd,
+		.events = POLLOUT,
+	};
+
+	size_t sent = 0;
+	const size_t _len = *len;
+	while (sent < _len) {
+		const int ret = poll(&pfd, 1, timeout);
+		if (ret < 0)
+			return -1;
+
+		if (ret == 0)
+			return 0;
+
+		if (pfd.revents & (POLLERR | POLLHUP))
+			return -1;
+
+		assert((pfd.revents & POLLOUT) != 0);
+
+		const ssize_t sn = send(fd, buffer + sent, _len - sent, 0);
+		if (sn < 0)
+			return -1;
+
+		if (sn == 0)
+			break;
+
+		sent += (size_t)sn;
+	}
+
+	*len = sent;
+	return 1;
 }
 
 

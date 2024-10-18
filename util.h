@@ -163,6 +163,17 @@ void url_free(Url *a);
 
 
 /*
+ * net
+ */
+/* ret:
+ *  -1: error
+ *   0: timeout
+ *   1: ok
+ */
+int net_blocking_send(int fd, const char buffer[], size_t *len, int timeout);
+
+
+/*
  * Log
  */
 int  log_init(void);
