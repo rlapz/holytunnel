@@ -89,7 +89,6 @@ static int  _worker_client_state_response(Worker *w, Client *client);
 static int  _worker_client_state_forward_header(Worker *w, Client *client);
 static int  _worker_client_state_forward_all(Worker *w, Client *client);
 
-static int  _worker_client_blocking_send(Worker *w, Client *client);
 static void _worker_on_destroy_active_client(void *client, void *udata);
 static void _worker_on_resolved(const char addr[], void *worker, void *client);
 
@@ -105,6 +104,7 @@ typedef struct server {
 	unsigned      workers_len;
 	Worker       *workers;
 	Resolver      resolver;
+	Config        config;
 } Server;
 
 static int  _server_open_signal_fd(Server *s);
@@ -124,7 +124,7 @@ static int  _server_resolver_thrd(void *udata);
  * public
  */
 int
-holytunnel_run(const char lhost[], int lport)
+holytunnel_run(Config *config)
 {
 	int ret = -1;
 	Server server;
@@ -136,6 +136,9 @@ holytunnel_run(const char lhost[], int lport)
 		return -1;
 	}
 
+	server.config = *config;
+	const char *const lhost = server.config.listen_host;
+	const int lport = server.config.listen_port;
 	if (_server_open_listen_fd(&server, lhost, lport) < 0)
 		goto out0;
 
@@ -335,7 +338,10 @@ _worker_client_add(Worker *w, int src_fd, int trg_fd, int state, Client *peer)
 		return -1;
 	}
 
+#ifdef DEBUG
+	memset(client, 0xaa, sizeof(*client));
 	log_debug("holytunnel: _worker_client_add[%u]: new client: %p", w->index, (void *)client);
+#endif
 
 	client->event.events = EPOLLIN;
 	client->event.data.ptr = client;
@@ -369,8 +375,6 @@ _worker_client_del(Worker *w, Client *client)
 		peer->event.events = EPOLLIN | EPOLLOUT;
 		if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, peer->src_fd, &peer->event) < 0) {
 			log_err(errno, "holytunnel: _worker_client_del[%u]: epoll_ctl: mod: peer", w->index);
-
-			/* TODO */
 			abort();
 		}
 
@@ -380,8 +384,6 @@ _worker_client_del(Worker *w, Client *client)
 
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_DEL, client->src_fd, &client->event) < 0) {
 		log_err(errno, "holytunnel: _worker_client_del[%u]: epoll_ctl: del", w->index);
-
-		/* TODO */
 		abort();
 	}
 
@@ -420,7 +422,7 @@ _worker_client_state_header(Worker *w, Client *client)
 	client->recvd = recvd + (size_t)rv;
 
 #ifdef DEBUG
-	buffer[client->recvd - 1] = '\0';
+	buffer[client->recvd] = '\0';
 	log_debug("holytunnel: _worker_client_state_header[%u]: recv: \n|%s|", w->index, buffer);
 #endif
 
@@ -481,11 +483,8 @@ _worker_client_state_header_get_host(Worker *w, Client *client)
 	log_debug("holytunnel: _worker_client_state_header_get_host[%u]: host: |%s:%s|", w->index,
 		 client->url.host, client->url.port);
 
-
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_DEL, client->src_fd, &client->event) < 0) {
-		log_err(errno, "holytunnel: _worker_client_state_header_get_host[%u]: epoll_ctl", w->index);
-
-		/* TODO */
+		log_err(errno, "holytunnel: _worker_client_state_header_get_host[%u]: epoll_ctl: del", w->index);
 		abort();
 	}
 
@@ -562,6 +561,8 @@ _worker_on_resolved(const char addr[], void *worker, void *client)
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, c->src_fd, &c->event) < 0) {
 		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: add");
 	}
+
+	url_free(&c->url);
 }
 
 

@@ -2,7 +2,10 @@
 #define __HOLYTUNNEL_H__
 
 
-int holytunnel_run(const char lhost[], int lport);
+#include "config.h"
+
+
+int holytunnel_run(Config *config);
 
 
 #endif
