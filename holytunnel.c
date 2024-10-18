@@ -389,6 +389,11 @@ _worker_client_del(Worker *w, Client *client)
 
 	close(client->src_fd);
 	url_free(&client->url);
+
+#ifdef DEBUG
+	memset(client, 0xaa, sizeof(*client));
+#endif
+
 	mempool_free(&w->clients, client);
 }
 
@@ -443,8 +448,6 @@ _worker_client_state_header(Worker *w, Client *client)
 	if ((method_len == 7) && (strncasecmp(method, "CONNECT", method_len) == 0))
 		client->type = _CLIENT_TYPE_HTTPS;
 
-	/* ok */
-	log_debug("holytunnel: _worker_client_state_header[%u]: OK", w->index);
 	return _worker_client_state_header_get_host(w, client);
 }
 
@@ -483,8 +486,10 @@ _worker_client_state_header_get_host(Worker *w, Client *client)
 	log_debug("holytunnel: _worker_client_state_header_get_host[%u]: host: |%s:%s|", w->index,
 		 client->url.host, client->url.port);
 
-	if (epoll_ctl(w->event_fd, EPOLL_CTL_DEL, client->src_fd, &client->event) < 0) {
-		log_err(errno, "holytunnel: _worker_client_state_header_get_host[%u]: epoll_ctl: del", w->index);
+	/* sleeping... */
+	client->event.events = 0;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, client->src_fd, &client->event) < 0) {
+		log_err(errno, "holytunnel: _worker_client_state_header_get_host[%u]: epoll_ctl: mod", w->index);
 		abort();
 	}
 
@@ -552,17 +557,16 @@ _worker_on_destroy_active_client(void *client, void *udata)
 static void
 _worker_on_resolved(const char addr[], void *worker, void *client)
 {
+	/* WARN: callback function with no locks */
 	Worker *const w = (Worker *)worker;
 	Client *const c = (Client *)client;
 	log_debug("holytunnel: _worker_on_resolved[%u]: %p: %s", w->index, client, addr);
 
-	/* TODO */
 	c->event.events = EPOLLIN | EPOLLOUT;
-	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, c->src_fd, &c->event) < 0) {
-		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: add");
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, c->src_fd, &c->event) < 0) {
+		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: mod");
+		abort();
 	}
-
-	url_free(&c->url);
 }
 
 
