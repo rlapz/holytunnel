@@ -158,7 +158,7 @@ typedef struct uri {
  *   host_len: 10
  *   port:     443
  */
-int  url_parse(Url *a, const char url[], size_t len, const char default_port[]);
+int  url_parse(Url *a, const char url[], int len, const char default_port[]);
 void url_free(Url *a);
 
 

@@ -574,7 +574,7 @@ out0:
  * TODO: parse url without heap allocation (without curl)
  */
 int
-url_parse(Url *a, const char url[], size_t len, const char default_port[])
+url_parse(Url *a, const char url[], int len, const char default_port[])
 {
 	int ret = -1;
 	CURLU *curl;
@@ -583,7 +583,7 @@ url_parse(Url *a, const char url[], size_t len, const char default_port[])
 
 	char *new_url;
 	if (strstr(url, "://") == NULL)
-		new_url = curl_maprintf("http://%.*s", (int)len, url);
+		new_url = curl_maprintf("http://%.*s", len, url);
 	else
 		new_url = curl_maprintf("%.*s", (int)len, url);
 
@@ -634,6 +634,8 @@ url_free(Url *a)
 {
 	curl_free(a->host);
 	curl_free(a->port);
+	a->host = NULL;
+	a->port = NULL;
 }
 
 

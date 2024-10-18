@@ -45,17 +45,18 @@ enum {
 
 typedef struct client Client;
 struct client {
-	int          type;
-	int          state;
-	int          src_fd;
-	int          trg_fd;
-	Event        event;
-	Client      *peer;
-	HttpRequest  request;
-	Url          url;
-	size_t       sent;
-	size_t       recvd;
-	char         buffer[CFG_BUFFER_MAX_SIZE];
+	int              type;
+	int              state;
+	int              src_fd;
+	int              trg_fd;
+	Event            event;
+	Client          *peer;
+	HttpRequest      request;
+	Url              url;
+	ResolverContext  resolver_ctx;
+	size_t           sent;
+	size_t           recvd;
+	char             buffer[CFG_BUFFER_SIZE];
 };
 
 static const char *_client_state_str(int state);
@@ -81,7 +82,7 @@ static void _worker_handle_client_state(Worker *w, Client *client);
 static int  _worker_client_add(Worker *w, int src_fd, int trg_fd, int state, Client *peer);
 static void _worker_client_del(Worker *w, Client *client);
 static int  _worker_client_state_header(Worker *w, Client *client);
-static int  _worker_client_state_header_parse(Worker *w, Client *client);
+static int  _worker_client_state_header_get_host(Worker *w, Client *client);
 static int  _worker_client_state_resolver(Worker *w, Client *client);
 static int  _worker_client_state_connect(Worker *w, Client *client);
 static int  _worker_client_state_response(Worker *w, Client *client);
@@ -90,6 +91,7 @@ static int  _worker_client_state_forward_all(Worker *w, Client *client);
 
 static int  _worker_client_blocking_send(Worker *w, Client *client);
 static void _worker_on_destroy_active_client(void *client, void *udata);
+static void _worker_on_resolved(const char addr[], void *worker, void *client);
 
 
 /*
@@ -112,6 +114,7 @@ static void _server_destroy_workers(Server *s);
 static int  _server_event_loop(Server *s);
 static void _server_event_handle_listener(Server *s);
 static void _server_event_handle_signal(Server *s);
+static int  _server_resolver_thrd(void *udata);
 
 
 /*********************************************************************************************
@@ -125,33 +128,48 @@ holytunnel_run(const char lhost[], int lport)
 {
 	int ret = -1;
 	Server server;
+	thrd_t resolver_thrd;
 
 	memset(&server, 0, sizeof(server));
+	if (log_init() < 0) {
+		fprintf(stdout, "holytunnel: run: log_init: failed");
+		return -1;
+	}
 
 	if (_server_open_listen_fd(&server, lhost, lport) < 0)
-		return -1;
+		goto out0;
 
 	if (_server_open_signal_fd(&server) < 0)
-		goto out0;
+		goto out1;
 
 	/* TODO */
 	if (resolver_init(&server.resolver, CFG_RESOLVER_DEFAULT, CFG_DOH_ADGUARD) < 0)
-		goto out1;
+		goto out2;
+
+	if (thrd_create(&resolver_thrd, _server_resolver_thrd, &server.resolver) != thrd_success) {
+		log_err(0, "holytunnel: run: thrd_create: _server_resolver_thrd: failed");
+		goto out3;
+	}
 
 	if (_server_create_workers(&server) < 0)
-		goto out2;
+		goto out4;
 
 	log_info("holytunnel: run: listening on: \"%s:%d\"", lhost, lport);
 	ret = _server_event_loop(&server);
 
 	_server_destroy_workers(&server);
 
-out2:
+out4:
+	resolver_stop(&server.resolver);
+	thrd_join(resolver_thrd, NULL);
+out3:
 	resolver_deinit(&server.resolver);
-out1:
+out2:
 	close(server.signal_fd);
-out0:
+out1:
 	close(server.listen_fd);
+out0:
+	log_deinit();
 	return ret;
 }
 
@@ -204,7 +222,7 @@ _worker_create(Worker *w, Resolver *resolver, unsigned index)
 		return -1;
 	}
 
-	if (mempool_init(&w->clients, sizeof(Client), CFG_CLIENT_MIN_SIZE) < 0) {
+	if (mempool_init(&w->clients, sizeof(Client), CFG_CLIENT_SIZE) < 0) {
 		log_err(ENOMEM, "holytunnel: _worker_create[%u]: mempool_init", index);
 		goto err0;
 	}
@@ -335,6 +353,7 @@ _worker_client_add(Worker *w, int src_fd, int trg_fd, int state, Client *peer)
 	client->url.port = NULL;
 	client->sent = 0;
 	client->recvd = 0;
+	client->request.headers_len = CFG_HTTP_HEADER_SIZE;
 	client->peer = peer;
 	return 0;
 }
@@ -375,20 +394,117 @@ _worker_client_del(Worker *w, Client *client)
 static int
 _worker_client_state_header(Worker *w, Client *client)
 {
-	return _CLIENT_STATE_STOP;
+	const size_t recvd = client->recvd;
+	char *const buffer = client->buffer;
+	const size_t buffer_size = CFG_BUFFER_SIZE;
+	if (recvd >= buffer_size) {
+		/* TODO: flexible buffer size */
+		log_err(0, "holytunnel: _worker_client_state_header[%u]: buffer full", w->index);
+		return _CLIENT_STATE_STOP;
+	}
+
+	const ssize_t rv = recv(client->src_fd, buffer + recvd, buffer_size - recvd, 0);
+	if (rv < 0) {
+		if (errno == EAGAIN)
+			return _CLIENT_STATE_HEADER;
+
+		log_err(errno, "holytunnel: _worker_client_state_header[%u]: recv", w->index);
+		return _CLIENT_STATE_STOP;
+	}
+
+	if (rv == 0) {
+		log_err(0, "holytunnel: _worker_client_state_header[%u]: recv: EOF", w->index);
+		return _CLIENT_STATE_STOP;
+	}
+
+	client->recvd = recvd + (size_t)rv;
+
+#ifdef DEBUG
+	buffer[client->recvd - 1] = '\0';
+	log_debug("holytunnel: _worker_client_state_header[%u]: recv: \n|%s|", w->index, buffer);
+#endif
+
+	switch (http_request_parse(&client->request, buffer, client->recvd, recvd)) {
+	case -1:
+		log_err(0, "holytunnel: _worker_client_state_header[%u]: http_request_parse: invalid request",
+			w->index);
+
+		/* TODO: send error response */
+		return _CLIENT_STATE_STOP;
+	case -2:
+		/* header incomplete */
+		return _CLIENT_STATE_HEADER;
+	}
+
+	const char *const method = client->request.method;
+	const size_t method_len = client->request.method_len;
+	if ((method_len == 7) && (strncasecmp(method, "CONNECT", method_len) == 0))
+		client->type = _CLIENT_TYPE_HTTPS;
+
+	/* ok */
+	log_debug("holytunnel: _worker_client_state_header[%u]: OK", w->index);
+	return _worker_client_state_header_get_host(w, client);
 }
 
 
 static int
-_worker_client_state_header_parse(Worker *w, Client *client)
+_worker_client_state_header_get_host(Worker *w, Client *client)
 {
-	return _CLIENT_STATE_STOP;
+	const size_t headers_len = client->request.headers_len;
+	const HttpHeader *const headers = client->request.headers;
+
+	const char *host = NULL;
+	size_t host_len = 0;
+	for (size_t i = 0; i < headers_len; i++) {
+		const HttpHeader *const header = &headers[i];
+		if ((header->name_len == 4) && (strncasecmp(header->name, "Host", header->name_len) == 0)) {
+			host = header->value;
+			host_len = header->value_len;
+			break;
+		}
+	}
+
+	/* no host found, use 'path' instead */
+	if (host == NULL) {
+		host = client->request.path;
+		host_len = client->request.path_len;
+	}
+
+	const char *const def_port = (client->type == _CLIENT_TYPE_HTTPS)? "443" : "80";
+	if (url_parse(&client->url, host, (int)host_len, def_port) < 0) {
+		log_err(0, "holytunnel: _worker_client_state_header_get_host[%u]: url_parse: invalid request",
+			w->index);
+
+		return _CLIENT_STATE_STOP;
+	}
+
+	log_debug("holytunnel: _worker_client_state_header_get_host[%u]: host: |%s:%s|", w->index,
+		 client->url.host, client->url.port);
+
+
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_DEL, client->src_fd, &client->event) < 0) {
+		log_err(errno, "holytunnel: _worker_client_state_header_get_host[%u]: epoll_ctl", w->index);
+
+		/* TODO */
+		abort();
+	}
+
+	client->resolver_ctx.callback_fn = _worker_on_resolved;
+	client->resolver_ctx.udata0 = w;
+	client->resolver_ctx.udata1 = client;
+	client->resolver_ctx.host = client->url.host;
+	client->resolver_ctx.port = client->url.port;
+	if (resolver_resolve(w->resolver, &client->resolver_ctx) < 0)
+		abort();
+
+	return _CLIENT_STATE_RESOLVER;
 }
 
 
 static int
 _worker_client_state_resolver(Worker *w, Client *client)
 {
+	log_debug("holytunnel: _worker_client_state_resolver[%u]: nice", w->index);
 	return _CLIENT_STATE_STOP;
 }
 
@@ -431,6 +547,21 @@ _worker_on_destroy_active_client(void *client, void *udata)
 
 	close(c->src_fd);
 	url_free(&c->url);
+}
+
+
+static void
+_worker_on_resolved(const char addr[], void *worker, void *client)
+{
+	Worker *const w = (Worker *)worker;
+	Client *const c = (Client *)client;
+	log_debug("holytunnel: _worker_on_resolved[%u]: %p: %s", w->index, client, addr);
+
+	/* TODO */
+	c->event.events = EPOLLIN | EPOLLOUT;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, c->src_fd, &c->event) < 0) {
+		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: add");
+	}
 }
 
 
@@ -655,4 +786,12 @@ _server_event_handle_signal(Server *s)
 		log_err(errno, "holytunnel: _server_event_handle_signal: invalid signal");
 		abort();
 	}
+}
+
+
+static int
+_server_resolver_thrd(void *udata)
+{
+	resolver_run((Resolver *)udata);
+	return 0;
 }

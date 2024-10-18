@@ -2,9 +2,8 @@
 #define __CONFIG_H__
 
 
-#define CFG_BUFFER_MIN_SIZE (8192)
-#define CFG_BUFFER_MAX_SIZE (1024 * 1024)
-#define CFG_CLIENT_MIN_SIZE (128)
+#define CFG_BUFFER_SIZE     (8192)
+#define CFG_CLIENT_SIZE     (128)
 #define CFG_SERVER_ADDR     "127.0.0.1"
 #define CFG_SERVER_PORT     "5395"
 #define CFG_EVENT_SIZE      (32)
