@@ -30,7 +30,6 @@ typedef struct epoll_event Event;
  */
 enum {
 	_CLIENT_STATE_HEADER,
-	_CLIENT_STATE_RESOLVER,
 	_CLIENT_STATE_CONNECT,
 	_CLIENT_STATE_RESPONSE,         /* HTTPS */
 	_CLIENT_STATE_FORWARD_HEADER,   /* HTTP  */
@@ -49,6 +48,7 @@ struct client {
 	int              state;
 	int              src_fd;
 	int              trg_fd;
+	int              trg_family;
 	Event            event;
 	Client          *peer;
 	HttpRequest      request;
@@ -83,7 +83,6 @@ static int  _worker_client_add(Worker *w, int src_fd, int trg_fd, int state, Cli
 static void _worker_client_del(Worker *w, Client *client);
 static int  _worker_client_state_header(Worker *w, Client *client);
 static int  _worker_client_state_header_get_host(Worker *w, Client *client);
-static int  _worker_client_state_resolver(Worker *w, Client *client);
 static int  _worker_client_state_connect(Worker *w, Client *client);
 static int  _worker_client_state_response(Worker *w, Client *client);
 static int  _worker_client_state_forward_header(Worker *w, Client *client);
@@ -188,11 +187,11 @@ _client_state_str(int state)
 {
 	switch (state) {
 	case _CLIENT_STATE_HEADER: return "header";
-	case _CLIENT_STATE_RESOLVER: return "resolver";
 	case _CLIENT_STATE_CONNECT: return "connect";
 	case _CLIENT_STATE_RESPONSE: return "response";
 	case _CLIENT_STATE_FORWARD_HEADER: return "forward header";
 	case _CLIENT_STATE_FORWARD_ALL: return "forward all";
+	case _CLIENT_STATE_STOP: return "stop";
 	}
 
 	return "unknown";
@@ -303,9 +302,6 @@ _worker_handle_client_state(Worker *w, Client *client)
 	case _CLIENT_STATE_HEADER:
 		state = _worker_client_state_header(w, client);
 		break;
-	case _CLIENT_STATE_RESOLVER:
-		state = _worker_client_state_resolver(w, client);
-		break;
 	case _CLIENT_STATE_CONNECT:
 		state = _worker_client_state_connect(w, client);
 		break;
@@ -355,6 +351,7 @@ _worker_client_add(Worker *w, int src_fd, int trg_fd, int state, Client *peer)
 	client->state = state;
 	client->src_fd = src_fd;
 	client->trg_fd = trg_fd;
+	client->trg_family = AF_INET;
 	client->url.host = NULL;
 	client->url.port = NULL;
 	client->sent = 0;
@@ -370,6 +367,11 @@ _worker_client_del(Worker *w, Client *client)
 {
 	log_debug("holytunnel: _worker_client_del[%u]: client: %p", w->index, (void *)client);
 
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_DEL, client->src_fd, &client->event) < 0) {
+		log_err(errno, "holytunnel: _worker_client_del[%u]: epoll_ctl: del", w->index);
+		abort();
+	}
+
 	Client *const peer = client->peer;
 	if (peer != NULL) {
 		peer->event.events = EPOLLIN | EPOLLOUT;
@@ -380,11 +382,9 @@ _worker_client_del(Worker *w, Client *client)
 
 		peer->state = _CLIENT_STATE_STOP;
 		peer->peer = NULL;
-	}
-
-	if (epoll_ctl(w->event_fd, EPOLL_CTL_DEL, client->src_fd, &client->event) < 0) {
-		log_err(errno, "holytunnel: _worker_client_del[%u]: epoll_ctl: del", w->index);
-		abort();
+	} else if (client->trg_fd > 0) {
+		close(client->trg_fd);
+		client->trg_fd = -1;
 	}
 
 	close(client->src_fd);
@@ -486,6 +486,8 @@ _worker_client_state_header_get_host(Worker *w, Client *client)
 	log_debug("holytunnel: _worker_client_state_header_get_host[%u]: host: |%s:%s|", w->index,
 		 client->url.host, client->url.port);
 
+	/* TODO: check host */
+
 	/* sleeping... */
 	client->event.events = 0;
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, client->src_fd, &client->event) < 0) {
@@ -501,21 +503,14 @@ _worker_client_state_header_get_host(Worker *w, Client *client)
 	if (resolver_resolve(w->resolver, &client->resolver_ctx) < 0)
 		abort();
 
-	return _CLIENT_STATE_RESOLVER;
-}
-
-
-static int
-_worker_client_state_resolver(Worker *w, Client *client)
-{
-	log_debug("holytunnel: _worker_client_state_resolver[%u]: nice", w->index);
-	return _CLIENT_STATE_STOP;
+	return _CLIENT_STATE_CONNECT;
 }
 
 
 static int
 _worker_client_state_connect(Worker *w, Client *client)
 {
+	log_debug("%.*s", (int)client->resolver_ctx.addr_len, client->resolver_ctx.addr);
 	return _CLIENT_STATE_STOP;
 }
 
@@ -562,6 +557,29 @@ _worker_on_resolved(const char addr[], void *worker, void *client)
 	Client *const c = (Client *)client;
 	log_debug("holytunnel: _worker_on_resolved[%u]: %p: %s", w->index, client, addr);
 
+
+	int trg_family;
+	const int trg_fd = net_open_tcp(addr, SOCK_NONBLOCK, &trg_family);
+	if (trg_fd < 0) {
+		log_err(errno, "holytunnel: _worker_on_resolved: net_open_tcp");
+		goto err0;
+	}
+
+	c->trg_fd = trg_fd;
+	c->trg_family = trg_family;
+	log_debug("holytunnel: _worker_on_resolved[%u]: %p: new trg_fd: %d", w->index, client, trg_fd);
+
+	/* prepare to connect to target fd */
+	c->event.events = EPOLLOUT;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, c->trg_fd, &c->event) < 0) {
+		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: add: trg_fd");
+		goto err0;
+	}
+
+	return;
+
+err0:
+	c->state = _CLIENT_STATE_STOP;
 	c->event.events = EPOLLIN | EPOLLOUT;
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, c->src_fd, &c->event) < 0) {
 		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: mod");

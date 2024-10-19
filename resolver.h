@@ -25,10 +25,11 @@ typedef struct resolver_context {
 	void              *udata0;
 	void              *udata1;
 	ResolverContextFn  callback_fn;
+	size_t             addr_len;
+	char               addr[INET6_ADDRSTRLEN];
 
 	/* private */
 	size_t    _host_len;
-	char      _addr[INET6_ADDRSTRLEN];
 	DListNode _node;
 } ResolverContext;
 

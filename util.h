@@ -136,7 +136,8 @@ typedef struct uri {
         char *port;
 } Url;
 
-/* @host_port: [host:port]
+/* url_parse:
+ * @host_port: [host:port]
  *
  * examples:
  *
@@ -165,12 +166,16 @@ void url_free(Url *a);
 /*
  * net
  */
-/* ret:
+/* net_blocking_send:
+ * ret:
  *  -1: error
  *   0: timeout
  *   1: ok
  */
 int net_blocking_send(int fd, const char buffer[], size_t *len, int timeout);
+int net_open_tcp(const char addr[], int flags, int *family);
+int net_connect_tcp4(int fd, const char addr[], int port);
+int net_connect_tcp6(int fd, const char addr[], int port);
 
 
 /*

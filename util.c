@@ -11,8 +11,8 @@
 #include <time.h>
 #include <threads.h>
 
+#include <arpa/inet.h>
 #include <sys/poll.h>
-
 #include <curl/curl.h>
 
 #include "util.h"
@@ -677,6 +677,52 @@ net_blocking_send(int fd, const char buffer[], size_t *len, int timeout)
 
 	*len = sent;
 	return 1;
+}
+
+
+int
+net_open_tcp(const char addr[], int flags, int *family)
+{
+	const int _flags = SOCK_STREAM | flags;
+
+	/* super weak ip version detector */
+	if (strpbrk(addr, "[]:") != NULL) {
+		*family = AF_INET6;
+		return socket(AF_INET6, _flags, IPPROTO_TCP);
+	}
+
+	*family = AF_INET;
+	return socket(AF_INET, _flags, IPPROTO_TCP);
+}
+
+
+int
+net_connect_tcp4(int fd, const char addr[], int port)
+{
+	struct sockaddr_in saddr = {
+		.sin_family = AF_INET,
+		.sin_port = htons(port),
+	};
+
+	if (inet_pton(AF_INET, addr, &saddr.sin_addr) < 0)
+		return -1;
+
+	return connect(fd, (struct sockaddr *)&saddr, sizeof(saddr));
+}
+
+
+int
+net_connect_tcp6(int fd, const char addr[], int port)
+{
+	struct sockaddr_in6 saddr = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(port),
+	};
+
+	if (inet_pton(AF_INET6, addr, &saddr.sin6_addr) < 0)
+		return -1;
+
+	return connect(fd, (struct sockaddr *)&saddr, sizeof(saddr));
 }
 
 

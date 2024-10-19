@@ -118,7 +118,7 @@ resolver_run(Resolver *r)
 		if (ret < 0)
 			ctx->callback_fn(NULL, ctx->udata0, ctx->udata1);
 		else
-			ctx->callback_fn(ctx->_addr, ctx->udata0, ctx->udata1);
+			ctx->callback_fn(ctx->addr, ctx->udata0, ctx->udata1);
 		mtx_lock(&r->mutex); // LOCK
 	}
 
@@ -204,7 +204,8 @@ _get_address(Resolver *r, ResolverContext *ctx)
 		}
 
 		/* success */
-		memcpy(ctx->_addr, host->addr, host->addr_len + 1);
+		ctx->addr_len = host->addr_len;
+		memcpy(ctx->addr, host->addr, host->addr_len + 1);
 		log_info("resolver: _get_address: load: \"%s\" -> (%s)", host->name, host->addr);
 		return 0;
 	}
