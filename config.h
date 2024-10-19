@@ -16,8 +16,6 @@
 #define CFG_HTTPS_RESPONSE_OK "HTTP/1.1 200 OK\r\n\r\n"
 #define CFG_HTTPS_CHUNK_SIZE  (13)
 
-/* RESOLVER_TYPE_DEFAULT, RESOLVER_TYPE_DOH */
-#define CFG_RESOLVER_DEFAULT      RESOLVER_TYPE_DOH
 #define CFG_RESOLVER_HTTP_TIMEOUT (5) /* seconds */
 
 #define CFG_DOH_ADGUARD    "https://dns.adguard-dns.com/resolve"
@@ -32,6 +30,8 @@
 typedef struct config {
 	const char *listen_host;
 	int         listen_port;
+	int         resolver_type;
+	const char *resolver_doh_url;
 } Config;
 
 

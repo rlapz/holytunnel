@@ -173,9 +173,9 @@ void url_free(Url *a);
  *   1: ok
  */
 int net_blocking_send(int fd, const char buffer[], size_t *len, int timeout);
-int net_open_tcp(const char addr[], int flags, int *family);
-int net_connect_tcp4(int fd, const char addr[], int port);
-int net_connect_tcp6(int fd, const char addr[], int port);
+int net_open_tcp(const char addr[], int flags);
+int net_connect_tcp(int fd, const char addr[], int port);
+int net_host_is_resolved(const char host[]);
 
 
 /*

@@ -577,54 +577,67 @@ int
 url_parse(Url *a, const char url[], int len, const char default_port[])
 {
 	int ret = -1;
-	CURLU *curl;
-	char *host = NULL;
-	char *port = NULL;
+	Str str_url;
+	char buffer[4096];
+
+	str_init(&str_url, buffer, LEN(buffer));
+	a->host = NULL;
+	a->port = NULL;
 
 	char *new_url;
 	if (strstr(url, "://") == NULL)
-		new_url = curl_maprintf("http://%.*s", len, url);
+		new_url = str_append_fmt(&str_url, "http://%.*s", len, url);
 	else
-		new_url = curl_maprintf("%.*s", (int)len, url);
+		new_url = str_append_fmt(&str_url, "%.*s", len, url);
 
 	if (new_url == NULL)
 		return -1;
 
-	curl = curl_url();
+	CURLU *const curl = curl_url();
 	if (curl == NULL)
-		goto out0;
+		return -1;
 
 	if (curl_url_set(curl, CURLUPART_URL, new_url, 0) != CURLUE_OK)
-		goto out1;
+		goto out0;
 
+	char *host = NULL;
 	if (curl_url_get(curl, CURLUPART_HOST, &host, 0) != CURLUE_OK)
-		goto out1;
+		goto out0;
 
+	char *port = NULL;
 	curl_url_get(curl, CURLUPART_PORT, &port, 0);
 	if (port == NULL) {
 		port = curl_maprintf("%s", default_port);
 		if (port == NULL)
-			goto out2;
+			goto out1;
 	}
 
+	const size_t new_host_len = strlen(host);
+	char *const new_host = calloc(1, new_host_len + 1);
+	if (new_host == NULL)
+		goto out2;
+
+	size_t i = 0;
+	for (size_t j = 0; j < new_host_len; j++) {
+		if ((host[j] == '[') || (host[j] == ']'))
+			continue;
+
+		new_host[i] = host[j];
+		i++;
+	}
+
+	new_host[i] = '\0';
+	a->host = new_host;
+	a->port = port;
 	ret = 0;
 
 out2:
 	if (ret < 0)
-		curl_free(host);
+		curl_free(port);
 out1:
-	curl_url_cleanup(curl);
+	curl_free(host);
 out0:
-	curl_free(new_url);
-
-	if (ret < 0) {
-		a->host = NULL;
-		a->port = NULL;
-	} else {
-		a->host = host;
-		a->port = port;
-	}
-
+	curl_url_cleanup(curl);
 	return ret;
 }
 
@@ -632,7 +645,7 @@ out0:
 void
 url_free(Url *a)
 {
-	curl_free(a->host);
+	free(a->host);
 	curl_free(a->port);
 	a->host = NULL;
 	a->port = NULL;
@@ -642,6 +655,22 @@ url_free(Url *a)
 /*
  * net
  */
+static int
+_net_check_ip_version(const char addr[], void *buffer)
+{
+	struct sockaddr_in *const addr4 = (struct sockaddr_in *)buffer;
+	if (inet_pton(AF_INET, addr, &addr4->sin_addr))
+		return AF_INET;
+
+	struct sockaddr_in6 *const addr6 = (struct sockaddr_in6 *)buffer;
+	if (inet_pton(AF_INET6, addr, &addr6->sin6_addr))
+		return AF_INET6;
+
+	return -1;
+}
+
+
+
 int
 net_blocking_send(int fd, const char buffer[], size_t *len, int timeout)
 {
@@ -681,48 +710,50 @@ net_blocking_send(int fd, const char buffer[], size_t *len, int timeout)
 
 
 int
-net_open_tcp(const char addr[], int flags, int *family)
+net_open_tcp(const char addr[], int flags)
 {
 	const int _flags = SOCK_STREAM | flags;
+	unsigned char buffer[sizeof(struct sockaddr_in6)];
 
-	/* super weak ip version detector */
-	if (strpbrk(addr, "[]:") != NULL) {
-		*family = AF_INET6;
-		return socket(AF_INET6, _flags, IPPROTO_TCP);
+	switch (_net_check_ip_version(addr, buffer)) {
+	case AF_INET: return socket(AF_INET, _flags, IPPROTO_TCP);
+	case AF_INET6: return socket(AF_INET6, _flags, IPPROTO_TCP);
 	}
 
-	*family = AF_INET;
-	return socket(AF_INET, _flags, IPPROTO_TCP);
+	return -1;
 }
 
 
 int
-net_connect_tcp4(int fd, const char addr[], int port)
+net_connect_tcp(int fd, const char addr[], int port)
 {
-	struct sockaddr_in saddr = {
-		.sin_family = AF_INET,
-		.sin_port = htons(port),
-	};
+	unsigned char buffer[sizeof(struct sockaddr_in6)];
+	struct sockaddr_in *const addr4 = (struct sockaddr_in *)buffer;
+	struct sockaddr_in6 *const addr6 = (struct sockaddr_in6 *)buffer;
 
-	if (inet_pton(AF_INET, addr, &saddr.sin_addr) < 0)
-		return -1;
+	switch (_net_check_ip_version(addr, buffer)) {
+	case AF_INET:
+		addr4->sin_family = AF_INET;
+		addr4->sin_port = htons(port);
+		return connect(fd, (struct sockaddr *)buffer, sizeof(struct sockaddr_in));
+	case AF_INET6:
+		addr6->sin6_family = AF_INET6;
+		addr6->sin6_port = htons(port);
+		return connect(fd, (struct sockaddr *)buffer, sizeof(struct sockaddr_in6));
+	}
 
-	return connect(fd, (struct sockaddr *)&saddr, sizeof(saddr));
+	return -1;
 }
 
 
 int
-net_connect_tcp6(int fd, const char addr[], int port)
+net_host_is_resolved(const char host[])
 {
-	struct sockaddr_in6 saddr = {
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(port),
-	};
+	unsigned char buffer[sizeof(struct sockaddr_in6)];
+	if (_net_check_ip_version(host, buffer) < 0)
+		return 0;
 
-	if (inet_pton(AF_INET6, addr, &saddr.sin6_addr) < 0)
-		return -1;
-
-	return connect(fd, (struct sockaddr *)&saddr, sizeof(saddr));
+	return 1;
 }
 
 

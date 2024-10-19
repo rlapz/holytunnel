@@ -48,7 +48,6 @@ struct client {
 	int              state;
 	int              src_fd;
 	int              trg_fd;
-	int              trg_family;
 	Event            event;
 	Client          *peer;
 	HttpRequest      request;
@@ -138,16 +137,14 @@ holytunnel_run(const Config *config)
 	}
 
 	server.config = *config;
-	const char *const lhost = server.config.listen_host;
-	const int lport = server.config.listen_port;
-	if (_server_open_listen_fd(&server, lhost, lport) < 0)
+	const Config *const cfg = &server.config;
+	if (_server_open_listen_fd(&server, cfg->listen_host, cfg->listen_port) < 0)
 		goto out0;
 
 	if (_server_open_signal_fd(&server) < 0)
 		goto out1;
 
-	/* TODO */
-	if (resolver_init(&server.resolver, CFG_RESOLVER_DEFAULT, CFG_DOH_ADGUARD) < 0)
+	if (resolver_init(&server.resolver, cfg->resolver_type, cfg->resolver_doh_url) < 0)
 		goto out2;
 
 	if (thrd_create(&resolver_thrd, _server_resolver_thrd, &server.resolver) != thrd_success) {
@@ -158,7 +155,7 @@ holytunnel_run(const Config *config)
 	if (_server_create_workers(&server) < 0)
 		goto out4;
 
-	log_info("holytunnel: run: listening on: \"%s:%d\"", lhost, lport);
+	log_info("holytunnel: run: listening on: \"%s:%d\"", cfg->listen_host, cfg->listen_port);
 	ret = _server_event_loop(&server);
 
 	_server_destroy_workers(&server);
@@ -208,19 +205,7 @@ _client_try_connect(const Client *client)
 		return -1;
 	}
 
-	switch (client->trg_family) {
-	case AF_INET:
-		ret = net_connect_tcp4(fd, client->resolver_ctx.addr, _port);
-		break;
-	case AF_INET6:
-		ret = net_connect_tcp6(fd, client->resolver_ctx.addr, _port);
-		break;
-	default:
-		log_err(0, "holytunnel: _client_try_connect: invalid socket family");
-		abort();
-	}
-
-	if (ret < 0) {
+	if (net_connect_tcp(fd, client->resolver_ctx.addr, _port) < 0) {
 		if ((errno == EINPROGRESS) || (errno == EAGAIN))
 			return 0;
 
@@ -401,7 +386,6 @@ _worker_client_add(Worker *w, int src_fd, int trg_fd, int state, Client *peer)
 	client->state = state;
 	client->src_fd = src_fd;
 	client->trg_fd = trg_fd;
-	client->trg_family = AF_INET;
 	client->url.host = NULL;
 	client->url.port = NULL;
 	client->sent = 0;
@@ -536,8 +520,6 @@ _worker_client_state_header_get_host(Worker *w, Client *client)
 	log_debug("holytunnel: _worker_client_state_header_get_host[%u]: host: |%s:%s|", w->index,
 		 client->url.host, client->url.port);
 
-	/* TODO: check host */
-
 	/* sleeping... */
 	client->event.events = 0;
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, client->src_fd, &client->event) < 0) {
@@ -545,13 +527,30 @@ _worker_client_state_header_get_host(Worker *w, Client *client)
 		abort();
 	}
 
-	client->resolver_ctx.callback_fn = _worker_on_resolved;
-	client->resolver_ctx.udata0 = w;
-	client->resolver_ctx.udata1 = client;
-	client->resolver_ctx.host = client->url.host;
-	client->resolver_ctx.port = client->url.port;
-	if (resolver_resolve(w->resolver, &client->resolver_ctx) < 0)
-		abort();
+	const char *const _host = client->url.host;
+	const char *const _port = client->url.port;
+	if (net_host_is_resolved(_host)) {
+		log_debug("holytunnel: _worker_client_state_header_get_host[%u]: host: |%s:%s|: already resolved",
+			  w->index, _host, _port);
+
+		ResolverContext *const ctx = &client->resolver_ctx;
+		const size_t _host_len = strlen(_host);
+
+		memcpy(ctx->addr, _host, _host_len + 1);
+		ctx->addr_len = _host_len;
+		ctx->host = _host;
+		ctx->port = _port;
+
+		_worker_on_resolved(ctx->addr, w, client);
+	} else {
+		client->resolver_ctx.callback_fn = _worker_on_resolved;
+		client->resolver_ctx.udata0 = w;
+		client->resolver_ctx.udata1 = client;
+		client->resolver_ctx.host = _host;
+		client->resolver_ctx.port = _port;
+		if (resolver_resolve(w->resolver, &client->resolver_ctx) < 0)
+			abort();
+	}
 
 	return _CLIENT_STATE_CONNECT;
 }
@@ -620,15 +619,18 @@ _worker_on_resolved(const char addr[], void *worker, void *client)
 	log_debug("holytunnel: _worker_on_resolved[%u]: %p: %s", w->index, client, addr);
 
 
-	int trg_family;
-	const int trg_fd = net_open_tcp(addr, SOCK_NONBLOCK, &trg_family);
+	if (addr == NULL) {
+		c->state = _CLIENT_STATE_STOP;
+		goto out0;
+	}
+
+	const int trg_fd = net_open_tcp(addr, SOCK_NONBLOCK);
 	if (trg_fd < 0) {
 		log_err(errno, "holytunnel: _worker_on_resolved: net_open_tcp");
 		goto out0;
 	}
 
 	c->trg_fd = trg_fd;
-	c->trg_family = trg_family;
 	log_debug("holytunnel: _worker_on_resolved[%u]: %p: new trg_fd: %d", w->index, client, trg_fd);
 
 
