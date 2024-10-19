@@ -59,6 +59,7 @@ struct client {
 	char             buffer[CFG_BUFFER_SIZE];
 };
 
+static int         _client_try_connect(const Client *client);
 static const char *_client_state_str(int state);
 static const char *_client_type_str(int type);
 
@@ -84,6 +85,7 @@ static void _worker_client_del(Worker *w, Client *client);
 static int  _worker_client_state_header(Worker *w, Client *client);
 static int  _worker_client_state_header_get_host(Worker *w, Client *client);
 static int  _worker_client_state_connect(Worker *w, Client *client);
+static int  _worker_client_state_peer(Worker *w, Client *client);
 static int  _worker_client_state_response(Worker *w, Client *client);
 static int  _worker_client_state_forward_header(Worker *w, Client *client);
 static int  _worker_client_state_forward_all(Worker *w, Client *client);
@@ -182,6 +184,54 @@ out0:
 /*
  * Client
  */
+static int
+_client_try_connect(const Client *client)
+{
+	int ret;
+	const int fd = client->trg_fd;
+	socklen_t fd_len = sizeof(fd);
+
+
+	const int _port = atoi(client->resolver_ctx.port);
+	if (_port == 0) {
+		log_err(errno, "holytunnel: _client_try_connect: invalid port: %s", client->resolver_ctx.port);
+		return -1;
+	}
+
+	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &ret, &fd_len) < 0) {
+		log_err(errno, "holytunnel: _client_try_connect: getsockopt");
+		return -1;
+	}
+
+	if (ret < 0) {
+		log_err(ret, "holytunnel: _client_try_connect: getsockopt: ret");
+		return -1;
+	}
+
+	switch (client->trg_family) {
+	case AF_INET:
+		ret = net_connect_tcp4(fd, client->resolver_ctx.addr, _port);
+		break;
+	case AF_INET6:
+		ret = net_connect_tcp6(fd, client->resolver_ctx.addr, _port);
+		break;
+	default:
+		log_err(0, "holytunnel: _client_try_connect: invalid socket family");
+		abort();
+	}
+
+	if (ret < 0) {
+		if ((errno == EINPROGRESS) || (errno == EAGAIN))
+			return 0;
+
+		log_err(errno, "holytunnel: _client_try_connect: net_connect_tcp");
+		return -1;
+	}
+
+	return 1;
+}
+
+
 static const char *
 _client_state_str(int state)
 {
@@ -511,6 +561,18 @@ static int
 _worker_client_state_connect(Worker *w, Client *client)
 {
 	log_debug("%.*s", (int)client->resolver_ctx.addr_len, client->resolver_ctx.addr);
+	switch (_client_try_connect(client)) {
+	case -1: return _CLIENT_STATE_STOP;
+	case 0: return _CLIENT_STATE_CONNECT;
+	}
+
+	return _worker_client_state_peer(w, client);
+}
+
+
+static int
+_worker_client_state_peer(Worker *w, Client *client)
+{
 	return _CLIENT_STATE_STOP;
 }
 
@@ -562,23 +624,38 @@ _worker_on_resolved(const char addr[], void *worker, void *client)
 	const int trg_fd = net_open_tcp(addr, SOCK_NONBLOCK, &trg_family);
 	if (trg_fd < 0) {
 		log_err(errno, "holytunnel: _worker_on_resolved: net_open_tcp");
-		goto err0;
+		goto out0;
 	}
 
 	c->trg_fd = trg_fd;
 	c->trg_family = trg_family;
 	log_debug("holytunnel: _worker_on_resolved[%u]: %p: new trg_fd: %d", w->index, client, trg_fd);
 
+
+	switch (_client_try_connect(c)) {
+	case -1:
+		c->state = _CLIENT_STATE_STOP;
+		goto out0;
+	case 0:
+		/* try again later */
+		break;
+	case 1:
+		/* next step */
+		goto out0;
+	}
+
 	/* prepare to connect to target fd */
+	c->state = _CLIENT_STATE_CONNECT;
 	c->event.events = EPOLLOUT;
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, c->trg_fd, &c->event) < 0) {
 		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: add: trg_fd");
-		goto err0;
+		goto out0;
 	}
 
 	return;
 
-err0:
+out0:
+	/* TODO */
 	c->state = _CLIENT_STATE_STOP;
 	c->event.events = EPOLLIN | EPOLLOUT;
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, c->src_fd, &c->event) < 0) {
