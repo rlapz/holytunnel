@@ -186,30 +186,31 @@ _client_try_connect(const Client *client)
 {
 	int ret;
 	const int fd = client->trg_fd;
-	socklen_t fd_len = sizeof(fd);
+	socklen_t ret_len = sizeof(ret);
 
 
-	const int _port = atoi(client->resolver_ctx.port);
-	if (_port == 0) {
-		log_err(errno, "holytunnel: _client_try_connect: invalid port: %s", client->resolver_ctx.port);
+	const int port = atoi(client->resolver_ctx.port);
+	const char *const addr = client->resolver_ctx.addr;
+	if (port == 0) {
+		log_err(errno, "holytunnel: _client_try_connect: \"%s:%d\": invalid port", addr, port);
 		return -1;
 	}
 
-	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &ret, &fd_len) < 0) {
-		log_err(errno, "holytunnel: _client_try_connect: getsockopt");
+	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &ret, &ret_len) < 0) {
+		log_err(errno, "holytunnel: _client_try_connect: getsockopt: \"%s:%d\"", addr, port);
 		return -1;
 	}
 
-	if (ret < 0) {
-		log_err(ret, "holytunnel: _client_try_connect: getsockopt: ret");
+	if (ret != 0) {
+		log_err(ret, "holytunnel: _client_try_connect: getsockopt: ret: \"%s:%d\"", addr, port);
 		return -1;
 	}
 
-	if (net_connect_tcp(fd, client->resolver_ctx.addr, _port) < 0) {
+	if (net_connect_tcp(fd, addr, port) < 0) {
 		if ((errno == EINPROGRESS) || (errno == EAGAIN))
 			return 0;
 
-		log_err(errno, "holytunnel: _client_try_connect: net_connect_tcp");
+		log_err(errno, "holytunnel: _client_try_connect: net_connect_tcp: \"%s:%d\""), addr, port;
 		return -1;
 	}
 

@@ -8,8 +8,6 @@
 #define CFG_SERVER_PORT     "5395"
 #define CFG_EVENT_SIZE      (32)
 #define CFG_EVENT_TIMEOUT   (500)      /* ms */
-#define CFG_SEND_WAIT_MAX   (1000 * 3)  /* ms */
-#define CFG_READ_WAIT_MAX   (1000 * 3)  /* ms */
 
 #define CFG_HTTP_HEADER_SIZE  (128)
 #define CFG_HTTP_CHUNK_SIZE   (3)

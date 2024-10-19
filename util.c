@@ -571,7 +571,6 @@ out0:
 
 /*
  * Url
- * TODO: parse url without heap allocation (without curl)
  */
 int
 url_parse(Url *a, const char url[], int len, const char default_port[])
@@ -613,7 +612,7 @@ url_parse(Url *a, const char url[], int len, const char default_port[])
 	}
 
 	const size_t new_host_len = strlen(host);
-	char *const new_host = calloc(1, new_host_len + 1);
+	char *const new_host = malloc(new_host_len + 1);
 	if (new_host == NULL)
 		goto out2;
 
