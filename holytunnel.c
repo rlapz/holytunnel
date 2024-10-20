@@ -30,7 +30,7 @@ typedef struct epoll_event Event;
  */
 enum {
 	_CLIENT_STATE_HEADER,
-	_CLIENT_STATE_CONNECT,
+	_CLIENT_STATE_PEER_CONNECT,
 	_CLIENT_STATE_RESPONSE,         /* HTTPS */
 	_CLIENT_STATE_FORWARD_HEADER,   /* HTTP  */
 	_CLIENT_STATE_FORWARD_ALL,
@@ -83,8 +83,7 @@ static int  _worker_client_add(Worker *w, int fd);
 static void _worker_client_del(Worker *w, Client *client);
 static int  _worker_client_state_header(Worker *w, Client *client);
 static int  _worker_client_state_header_get_host(Worker *w, Client *client);
-static int  _worker_client_state_connect(Worker *w, Client *client);
-static int  _worker_client_state_peer(Worker *w, Client *client);
+static int  _worker_client_state_peer_connect(Worker *w, Client *client);
 static int  _worker_client_state_response(Worker *w, Client *client);
 static int  _worker_client_state_forward_header(Worker *w, Client *client);
 static int  _worker_client_state_forward_all(Worker *w, Client *client);
@@ -220,7 +219,7 @@ _client_state_str(int state)
 {
 	switch (state) {
 	case _CLIENT_STATE_HEADER: return "header";
-	case _CLIENT_STATE_CONNECT: return "connect";
+	case _CLIENT_STATE_PEER_CONNECT: return "peer connect";
 	case _CLIENT_STATE_RESPONSE: return "response";
 	case _CLIENT_STATE_FORWARD_HEADER: return "forward header";
 	case _CLIENT_STATE_FORWARD_ALL: return "forward all";
@@ -335,8 +334,8 @@ _worker_handle_client_state(Worker *w, Client *client)
 	case _CLIENT_STATE_HEADER:
 		state = _worker_client_state_header(w, client);
 		break;
-	case _CLIENT_STATE_CONNECT:
-		state = _worker_client_state_connect(w, client);
+	case _CLIENT_STATE_PEER_CONNECT:
+		state = _worker_client_state_peer_connect(w, client);
 		break;
 	case _CLIENT_STATE_RESPONSE:
 		state = _worker_client_state_response(w, client);
@@ -392,7 +391,7 @@ _worker_client_add(Worker *w, int fd)
 	client->event.events = EPOLLIN;
 	client->event.data.ptr = client;
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, fd, &client->event) < 0) {
-		log_err(ENOMEM, "holytunnel: _worker_client_add[%u]: epoll_ctl: add: %d", w->index, fd);
+		log_err(errno, "holytunnel: _worker_client_add[%u]: epoll_ctl: add: %d", w->index, fd);
 		goto err1;
 	}
 
@@ -490,8 +489,12 @@ _worker_client_state_header(Worker *w, Client *client)
 
 	const char *const method = client->request.method;
 	const size_t method_len = client->request.method_len;
-	if ((method_len == 7) && (strncasecmp(method, "CONNECT", method_len) == 0))
+	if ((method_len == 7) && (strncasecmp(method, "CONNECT", method_len) == 0)) {
 		client->type = _CLIENT_TYPE_HTTPS;
+	} else {
+		/* TODO: handle HTTP request */
+		return _CLIENT_STATE_STOP;
+	}
 
 	return _worker_client_state_header_get_host(w, client);
 }
@@ -563,12 +566,18 @@ _worker_client_state_header_get_host(Worker *w, Client *client)
 			abort();
 	}
 
-	return _CLIENT_STATE_CONNECT;
+
+	switch (client->type) {
+	case _CLIENT_TYPE_HTTP: return _CLIENT_STATE_FORWARD_HEADER;
+	case _CLIENT_TYPE_HTTPS: return _CLIENT_STATE_RESPONSE;
+	}
+
+	return _CLIENT_STATE_STOP;
 }
 
 
 static int
-_worker_client_state_connect(Worker *w, Client *client)
+_worker_client_state_peer_connect(Worker *w, Client *client)
 {
 	Client *const peer = client->peer;
 	const char *const addr = peer->resolver_ctx.addr;
@@ -576,38 +585,76 @@ _worker_client_state_connect(Worker *w, Client *client)
 
 	switch (_client_try_connect(client, addr, port)) {
 	case -1: return _CLIENT_STATE_STOP;
-	case 0: return _CLIENT_STATE_CONNECT;
+	case 0: return _CLIENT_STATE_PEER_CONNECT;
 	}
 
-	return _worker_client_state_peer(w, client);
-}
 
+	client->trg_fd = peer->src_fd;
+	client->event.events = EPOLLIN;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, client->src_fd, &client->event) < 0) {
+		log_err(errno, "holytunnel: _worker_client_state_connect[%u]: epoll_ctl: mod: %d", w->index,
+			client->src_fd);
+		abort();
+	}
 
-static int
-_worker_client_state_peer(Worker *w, Client *client)
-{
-	return _CLIENT_STATE_STOP;
+	/* send reponse / forward http header */
+	peer->trg_fd = client->src_fd;
+	peer->event.events = EPOLLOUT;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, peer->src_fd, &peer->event) < 0) {
+		log_err(errno, "holytunnel: _worker_client_state_connect[%u]: epoll_ctl: mod: %d", w->index,
+			peer->src_fd);
+		abort();
+	}
+
+	return _CLIENT_STATE_FORWARD_ALL;
 }
 
 
 static int
 _worker_client_state_response(Worker *w, Client *client)
 {
-	return _CLIENT_STATE_STOP;
+	/* TODO */
+	ssize_t sn = send(client->src_fd, CFG_HTTPS_RESPONSE_OK, LEN(CFG_HTTPS_RESPONSE_OK) -1, 0);
+	if (sn <= 0)
+		return _CLIENT_STATE_STOP;
+
+	client->event.events = EPOLLIN;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, client->src_fd, &client->event) < 0)
+		abort();
+
+	return _CLIENT_STATE_FORWARD_ALL;
 }
 
 
 static int
 _worker_client_state_forward_header(Worker *w, Client *client)
 {
-	return _CLIENT_STATE_STOP;
+	/* TODO */
+	size_t len = client->recvd;
+	if (net_blocking_send(client->trg_fd, client->buffer, &len, CFG_BLOCKING_SEND_TIMEOUT) != 1)
+		return _CLIENT_STATE_STOP;
+
+	client->event.events = EPOLLIN;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, client->src_fd, &client->event) < 0)
+		abort();
+
+	return _CLIENT_STATE_FORWARD_ALL;
 }
 
 
 static int
 _worker_client_state_forward_all(Worker *w, Client *client)
 {
-	return _CLIENT_STATE_STOP;
+	/* TODO */
+	ssize_t rv = recv(client->src_fd, client->buffer, CFG_BUFFER_SIZE, 0);
+	if (rv <= 0)
+		return _CLIENT_STATE_STOP;
+
+	size_t len = (size_t)rv;
+	if (net_blocking_send(client->trg_fd, client->buffer, &len, CFG_BLOCKING_SEND_TIMEOUT) != 1)
+		return _CLIENT_STATE_STOP;
+
+	return _CLIENT_STATE_FORWARD_ALL;
 }
 
 
@@ -647,7 +694,7 @@ _worker_on_resolved(const char addr[], void *worker, void *client)
 	Client *const peer = c->peer;
 	peer->src_fd = trg_fd;
 	peer->trg_fd = c->src_fd;
-	peer->state = _CLIENT_STATE_CONNECT;
+	peer->state = _CLIENT_STATE_PEER_CONNECT;
 	peer->event.events = EPOLLOUT;
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, trg_fd, &peer->event) < 0) {
 		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: trg: %d", trg_fd);

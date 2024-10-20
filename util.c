@@ -583,11 +583,15 @@ url_parse(Url *a, const char url[], int len, const char default_port[])
 	a->host = NULL;
 	a->port = NULL;
 
-	char *new_url;
-	if (strstr(url, "://") == NULL)
-		new_url = str_append_fmt(&str_url, "http://%.*s", len, url);
+	const char *const tmp_url = str_set_fmt(&str_url, "%.*s", len, url);
+	if (tmp_url == NULL)
+		return -1;
+
+	const char *new_url;
+	if (strstr(tmp_url, "://") == NULL)
+		new_url = str_set_fmt(&str_url, "http://%.*s", len, url);
 	else
-		new_url = str_append_fmt(&str_url, "%.*s", len, url);
+		new_url = tmp_url;
 
 	if (new_url == NULL)
 		return -1;
@@ -596,8 +600,11 @@ url_parse(Url *a, const char url[], int len, const char default_port[])
 	if (curl == NULL)
 		return -1;
 
-	if (curl_url_set(curl, CURLUPART_URL, new_url, 0) != CURLUE_OK)
+	int xret = curl_url_set(curl, CURLUPART_URL, new_url, 0);
+	if (xret != CURLUE_OK) {
+		printf("curl: %s\n", curl_url_strerror(xret));
 		goto out0;
+	}
 
 	char *host = NULL;
 	if (curl_url_get(curl, CURLUPART_HOST, &host, 0) != CURLUE_OK)

@@ -2,12 +2,13 @@
 #define __CONFIG_H__
 
 
-#define CFG_BUFFER_SIZE     (8192)
-#define CFG_CLIENT_MIN_SIZE (32)
-#define CFG_SERVER_ADDR     "127.0.0.1"
-#define CFG_SERVER_PORT     "5395"
-#define CFG_EVENT_SIZE      (32)
-#define CFG_EVENT_TIMEOUT   (500)      /* ms */
+#define CFG_BUFFER_SIZE           (8192)
+#define CFG_CLIENT_MIN_SIZE       (32)
+#define CFG_SERVER_ADDR           "127.0.0.1"
+#define CFG_SERVER_PORT           "5395"
+#define CFG_EVENT_SIZE            (32)
+#define CFG_EVENT_TIMEOUT         (500)      /* ms */
+#define CFG_BLOCKING_SEND_TIMEOUT (3)        /* s */
 
 #define CFG_HTTP_HEADER_SIZE  (128)
 #define CFG_HTTP_CHUNK_SIZE   (3)
