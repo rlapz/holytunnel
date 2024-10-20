@@ -614,7 +614,7 @@ static int
 _worker_client_state_response(Worker *w, Client *client)
 {
 	/* TODO */
-	ssize_t sn = send(client->src_fd, CFG_HTTPS_RESPONSE_OK, LEN(CFG_HTTPS_RESPONSE_OK) -1, 0);
+	const ssize_t sn = send(client->src_fd, CFG_HTTPS_RESPONSE_OK, LEN(CFG_HTTPS_RESPONSE_OK) -1, 0);
 	if (sn <= 0)
 		return _CLIENT_STATE_STOP;
 
@@ -646,7 +646,7 @@ static int
 _worker_client_state_forward_all(Worker *w, Client *client)
 {
 	/* TODO */
-	ssize_t rv = recv(client->src_fd, client->buffer, CFG_BUFFER_SIZE, 0);
+	const ssize_t rv = recv(client->src_fd, client->buffer, CFG_BUFFER_SIZE, 0);
 	if (rv <= 0)
 		return _CLIENT_STATE_STOP;
 
@@ -666,7 +666,9 @@ _worker_on_destroy_active_client(void *client, void *udata)
 	log_debug("holytunnel: _worker_on_destroy_active_client[%u]: [%p: %d]", w->index, client,
 		  c->src_fd);
 
-	close(c->src_fd);
+	if (c->src_fd > 0)
+		close(c->src_fd);
+
 	url_free(&c->url);
 }
 
@@ -702,7 +704,6 @@ _worker_on_resolved(const char addr[], void *worker, void *client)
 	}
 
 	log_debug("holytunnel: _worker_on_resolved[%u]: %p: trg_fd: %d", w->index, client, trg_fd);
-	c->trg_fd = trg_fd;
 	return;
 
 err0:

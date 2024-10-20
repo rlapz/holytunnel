@@ -99,16 +99,16 @@ dlist_pop(DList *d)
 /*
  * CstrMap
  *
- * 32bit FNV-1a case-insensitive hash function & hash map
+ * 64bit FNV-1a case-insensitive hash function & hash map
  * ref: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
  */
 static CstrMapItem *
 _cstrmap_map(CstrMap *c, const char key[])
 {
-	uint32_t hash = 0x811c9dc5; /* FNV-1 offset */
+	uint64_t hash = 0xcbf29ce484222325; /* FNV-1 offset */
 	for (const char *p = key; *p != '\0'; p++) {
-		hash ^= (uint32_t)((unsigned char)tolower(*p));
-		hash *= 0x01000193; /* FNV-1 prime */
+		hash ^= (uint64_t)((unsigned char)tolower(*p));
+		hash *= 0x00000100000001b3; /* FNV-1 prime */
 	}
 
 	const size_t size = c->size;
@@ -688,21 +688,24 @@ net_blocking_send(int fd, const char buffer[], size_t *len, int timeout)
 	size_t sent = 0;
 	const size_t _len = *len;
 	while (sent < _len) {
-		const int ret = poll(&pfd, 1, timeout);
-		if (ret < 0)
-			return -1;
-
-		if (ret == 0)
-			return 0;
-
-		if (pfd.revents & (POLLERR | POLLHUP))
-			return -1;
-
-		assert((pfd.revents & POLLOUT) != 0);
-
 		const ssize_t sn = send(fd, buffer + sent, _len - sent, 0);
-		if (sn < 0)
-			return -1;
+		if (sn < 0) {
+			if (errno != EAGAIN)
+				return -1;
+
+			const int ret = poll(&pfd, 1, timeout);
+			if (ret < 0)
+				return -1;
+
+			if (ret == 0)
+				break;
+
+			if (pfd.revents & (POLLERR | POLLHUP))
+				return -1;
+
+			assert((pfd.revents & POLLOUT) != 0);
+			continue;
+		}
 
 		if (sn == 0)
 			break;
