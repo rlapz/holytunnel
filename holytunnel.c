@@ -58,7 +58,7 @@ struct client {
 	char             buffer[CFG_BUFFER_SIZE];
 };
 
-static int         _client_try_connect(const Client *client);
+static int         _client_try_connect(const Client *client, const char addr[], const char port[]);
 static const char *_client_state_str(int state);
 static const char *_client_type_str(int type);
 
@@ -79,7 +79,7 @@ static int  _worker_create(Worker *w, Resolver *resolver, unsigned index);
 static void _worker_destroy(Worker *w);
 static int  _worker_event_loop_thrd(void *worker);
 static void _worker_handle_client_state(Worker *w, Client *client);
-static int  _worker_client_add(Worker *w, int src_fd, int trg_fd, int state, Client *peer);
+static int  _worker_client_add(Worker *w, int fd);
 static void _worker_client_del(Worker *w, Client *client);
 static int  _worker_client_state_header(Worker *w, Client *client);
 static int  _worker_client_state_header_get_host(Worker *w, Client *client);
@@ -182,35 +182,32 @@ out0:
  * Client
  */
 static int
-_client_try_connect(const Client *client)
+_client_try_connect(const Client *client, const char addr[], const char port[])
 {
 	int ret;
-	const int fd = client->trg_fd;
+	const int fd = client->src_fd;
 	socklen_t ret_len = sizeof(ret);
-
-
-	const int port = atoi(client->resolver_ctx.port);
-	const char *const addr = client->resolver_ctx.addr;
-	if (port == 0) {
-		log_err(errno, "holytunnel: _client_try_connect: \"%s:%d\": invalid port", addr, port);
+	const int _port = atoi(port);
+	if (_port == 0) {
+		log_err(errno, "holytunnel: _client_try_connect: \"%s:%d\": invalid port", addr, _port);
 		return -1;
 	}
 
 	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &ret, &ret_len) < 0) {
-		log_err(errno, "holytunnel: _client_try_connect: getsockopt: \"%s:%d\"", addr, port);
+		log_err(errno, "holytunnel: _client_try_connect: getsockopt: \"%s:%d\"", addr, _port);
 		return -1;
 	}
 
 	if (ret != 0) {
-		log_err(ret, "holytunnel: _client_try_connect: getsockopt: ret: \"%s:%d\"", addr, port);
+		log_err(ret, "holytunnel: _client_try_connect: getsockopt: ret: \"%s:%d\"", addr, _port);
 		return -1;
 	}
 
-	if (net_connect_tcp(fd, addr, port) < 0) {
+	if (net_connect_tcp(fd, addr, _port) < 0) {
 		if ((errno == EINPROGRESS) || (errno == EAGAIN))
 			return 0;
 
-		log_err(errno, "holytunnel: _client_try_connect: net_connect_tcp: \"%s:%d\""), addr, port;
+		log_err(errno, "holytunnel: _client_try_connect: net_connect_tcp: \"%s:%d\"", addr, _port);
 		return -1;
 	}
 
@@ -260,7 +257,7 @@ _worker_create(Worker *w, Resolver *resolver, unsigned index)
 		return -1;
 	}
 
-	if (mempool_init(&w->clients, sizeof(Client), CFG_CLIENT_SIZE) < 0) {
+	if (mempool_init(&w->clients, sizeof(Client), CFG_CLIENT_MIN_SIZE) < 0) {
 		log_err(ENOMEM, "holytunnel: _worker_create[%u]: mempool_init", index);
 		goto err0;
 	}
@@ -360,47 +357,59 @@ _worker_handle_client_state(Worker *w, Client *client)
 
 
 static int
-_worker_client_add(Worker *w, int src_fd, int trg_fd, int state, Client *peer)
+_worker_client_add(Worker *w, int fd)
 {
-	log_debug("holytunnel: _worker_client_add[%u]: new client: fd: %d", w->index, src_fd);
+	log_debug("holytunnel: _worker_client_add[%u]: new client: fd: %d", w->index, fd);
 
 	Client *const client = mempool_alloc(&w->clients);
 	if (client == NULL) {
-		log_err(ENOMEM, "holytunnel: _worker_client_add[%u]: mempool_alloc", w->index);
+		log_err(ENOMEM, "holytunnel: _worker_client_add[%u]: mempool_alloc: src", w->index);
 		return -1;
 	}
 
-#ifdef DEBUG
-	memset(client, 0xaa, sizeof(*client));
-	log_debug("holytunnel: _worker_client_add[%u]: new client: %p", w->index, (void *)client);
-#endif
+	Client *const peer = mempool_alloc(&w->clients);
+	if (peer == NULL) {
+		log_err(ENOMEM, "holytunnel: _worker_client_add[%u]: mempool_alloc: trg", w->index);
+		goto err0;
+	}
+
+	memset(client, 0, sizeof(*client));
+	client->type = _CLIENT_TYPE_HTTP;
+	client->state = _CLIENT_STATE_HEADER;
+	client->src_fd = fd;
+	client->trg_fd = -1;
+	client->request.headers_len = CFG_HTTP_HEADER_SIZE;
+	client->peer = peer;
+	log_debug("holytunnel: _worker_client_add[%u]: new client: src: %p", w->index, (void *)client);
+
+	memset(peer, 0, sizeof(*peer));
+	peer->src_fd = -1;
+	peer->trg_fd = -1;
+	peer->peer = client;
+	peer->event.data.ptr = peer;
+	log_debug("holytunnel: _worker_client_add[%u]: new client: trg: %p", w->index, (void*)peer);
 
 	client->event.events = EPOLLIN;
 	client->event.data.ptr = client;
-	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, src_fd, &client->event) < 0) {
-		log_err(ENOMEM, "holytunnel: _worker_client_add[%u]: epoll_ctl: add", w->index);
-		mempool_free(&w->clients, client);
-		return -1;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, fd, &client->event) < 0) {
+		log_err(ENOMEM, "holytunnel: _worker_client_add[%u]: epoll_ctl: add: %d", w->index, fd);
+		goto err1;
 	}
 
-	client->type = _CLIENT_TYPE_HTTP;
-	client->state = state;
-	client->src_fd = src_fd;
-	client->trg_fd = trg_fd;
-	client->url.host = NULL;
-	client->url.port = NULL;
-	client->sent = 0;
-	client->recvd = 0;
-	client->request.headers_len = CFG_HTTP_HEADER_SIZE;
-	client->peer = peer;
 	return 0;
+
+err1:
+	mempool_free(&w->clients, peer);
+err0:
+	mempool_free(&w->clients, client);
+	return -1;
 }
 
 
 static void
 _worker_client_del(Worker *w, Client *client)
 {
-	log_debug("holytunnel: _worker_client_del[%u]: client: %p", w->index, (void *)client);
+	log_debug("holytunnel: _worker_client_del[%u]: client: src: %p", w->index, (void *)client);
 
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_DEL, client->src_fd, &client->event) < 0) {
 		log_err(errno, "holytunnel: _worker_client_del[%u]: epoll_ctl: del", w->index);
@@ -408,27 +417,28 @@ _worker_client_del(Worker *w, Client *client)
 	}
 
 	Client *const peer = client->peer;
-	if (peer != NULL) {
+	if (peer == NULL)
+		goto out0;
+
+	if (peer->src_fd < 0) {
+		/* has no event attached yet! */
+		log_debug("holytunnel: _worker_client_del[%u]: client: trg: %p", w->index, (void *)peer);
+		mempool_free(&w->clients, peer);
+	} else {
+		peer->state = _CLIENT_STATE_STOP;
+		peer->peer = NULL;
+
 		peer->event.events = EPOLLIN | EPOLLOUT;
+		peer->event.data.ptr = peer;
 		if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, peer->src_fd, &peer->event) < 0) {
 			log_err(errno, "holytunnel: _worker_client_del[%u]: epoll_ctl: mod: peer", w->index);
 			abort();
 		}
-
-		peer->state = _CLIENT_STATE_STOP;
-		peer->peer = NULL;
-	} else if (client->trg_fd > 0) {
-		close(client->trg_fd);
-		client->trg_fd = -1;
 	}
 
+out0:
 	close(client->src_fd);
 	url_free(&client->url);
-
-#ifdef DEBUG
-	memset(client, 0xaa, sizeof(*client));
-#endif
-
 	mempool_free(&w->clients, client);
 }
 
@@ -560,8 +570,11 @@ _worker_client_state_header_get_host(Worker *w, Client *client)
 static int
 _worker_client_state_connect(Worker *w, Client *client)
 {
-	log_debug("%.*s", (int)client->resolver_ctx.addr_len, client->resolver_ctx.addr);
-	switch (_client_try_connect(client)) {
+	Client *const peer = client->peer;
+	const char *const addr = peer->resolver_ctx.addr;
+	const char *const port = peer->resolver_ctx.port;
+
+	switch (_client_try_connect(client, addr, port)) {
 	case -1: return _CLIENT_STATE_STOP;
 	case 0: return _CLIENT_STATE_CONNECT;
 	}
@@ -621,44 +634,31 @@ _worker_on_resolved(const char addr[], void *worker, void *client)
 
 
 	if (addr == NULL) {
-		c->state = _CLIENT_STATE_STOP;
-		goto out0;
+		log_err(0, "holytunnel: _worker_on_resolved[%u]: %p: addr: NULL", w->index, client);
+		goto err0;
 	}
 
 	const int trg_fd = net_open_tcp(addr, SOCK_NONBLOCK);
 	if (trg_fd < 0) {
 		log_err(errno, "holytunnel: _worker_on_resolved: net_open_tcp");
-		goto out0;
+		goto err0;
 	}
 
+	Client *const peer = c->peer;
+	peer->src_fd = trg_fd;
+	peer->trg_fd = c->src_fd;
+	peer->state = _CLIENT_STATE_CONNECT;
+	peer->event.events = EPOLLOUT;
+	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, trg_fd, &peer->event) < 0) {
+		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: trg: %d", trg_fd);
+		goto err0;
+	}
+
+	log_debug("holytunnel: _worker_on_resolved[%u]: %p: trg_fd: %d", w->index, client, trg_fd);
 	c->trg_fd = trg_fd;
-	log_debug("holytunnel: _worker_on_resolved[%u]: %p: new trg_fd: %d", w->index, client, trg_fd);
-
-
-	switch (_client_try_connect(c)) {
-	case -1:
-		c->state = _CLIENT_STATE_STOP;
-		goto out0;
-	case 0:
-		/* try again later */
-		break;
-	case 1:
-		/* next step */
-		goto out0;
-	}
-
-	/* prepare to connect to target fd */
-	c->state = _CLIENT_STATE_CONNECT;
-	c->event.events = EPOLLOUT;
-	if (epoll_ctl(w->event_fd, EPOLL_CTL_ADD, c->trg_fd, &c->event) < 0) {
-		log_err(errno, "holytunnel: _worker_on_resolved: epoll_ctl: add: trg_fd");
-		goto out0;
-	}
-
 	return;
 
-out0:
-	/* TODO */
+err0:
 	c->state = _CLIENT_STATE_STOP;
 	c->event.events = EPOLLIN | EPOLLOUT;
 	if (epoll_ctl(w->event_fd, EPOLL_CTL_MOD, c->src_fd, &c->event) < 0) {
@@ -857,7 +857,7 @@ _server_event_handle_listener(Server *s)
 
 	const unsigned curr = s->workers_curr;
 	Worker *const worker = &s->workers[curr];
-	if (_worker_client_add(worker, fd, -1, _CLIENT_STATE_HEADER, NULL) < 0) {
+	if (_worker_client_add(worker, fd) < 0) {
 		/* TODO: use another worker thread */
 		close(fd);
 		return;
