@@ -45,7 +45,7 @@ type httpRequest struct {
 	hasConnectMethod bool
 }
 
-func (self *httpRequest) parse(buffer []byte) error {
+func (h *httpRequest) parse(buffer []byte) error {
 	rd := bufio.NewReader(bytes.NewReader(buffer))
 	req, err := http.ReadRequest(rd)
 	if err != nil {
@@ -54,15 +54,15 @@ func (self *httpRequest) parse(buffer []byte) error {
 
 	defer req.Body.Close()
 
-	self.method = req.Method
-	if self.method == "CONNECT" {
-		self.hasConnectMethod = true
+	h.method = req.Method
+	if h.method == "CONNECT" {
+		h.hasConnectMethod = true
 	} else {
-		self.hasConnectMethod = false
+		h.hasConnectMethod = false
 	}
 
 	path := req.URL.Path
-	if len(self.path) == 0 {
+	if len(h.path) == 0 {
 		path = "/"
 	}
 
@@ -75,39 +75,39 @@ func (self *httpRequest) parse(buffer []byte) error {
 		path += "#" + URL.RawFragment
 	}
 
-	self.path = path
-	self.version = req.Proto
+	h.path = path
+	h.version = req.Proto
 
 	startIdx := strings.Index(req.Host, "]") // IPv6
 	if startIdx < 0 {
 		startIdx = 0
 	}
 
-	self.hostPort = req.Host
+	h.hostPort = req.Host
 	if !strings.Contains(req.Host[startIdx:], ":") {
 		// need port
-		if self.hasConnectMethod {
-			self.hostPort += ":443"
+		if h.hasConnectMethod {
+			h.hostPort += ":443"
 		} else {
-			self.hostPort += ":80"
+			h.hostPort += ":80"
 		}
 	}
 
 	return nil
 }
 
-func (self *httpRequest) newHttpRequest(buffer []byte) ([]byte, error) {
+func (h *httpRequest) newHttpRequest(buffer []byte) ([]byte, error) {
 	reqLineEndIdx := bytes.Index(buffer, []byte("\r\n"))
 	if reqLineEndIdx < 0 {
 		return nil, errHttpRequestInval
 	}
 
-	u, err := url.Parse(self.path)
+	u, err := url.Parse(h.path)
 	if err != nil {
 		return nil, err
 	}
 
-	newReqLine := fmt.Sprintf("%s %s %s", self.method, u.Path, self.version)
+	newReqLine := fmt.Sprintf("%s %s %s", h.method, u.Path, h.version)
 	ret := buffer[reqLineEndIdx-len(newReqLine):]
 
 	copy(ret, newReqLine)
@@ -150,15 +150,15 @@ func NewClient(conn net.Conn) *client {
 	}
 }
 
-func (self *client) handle() {
-	defer self.source.Close()
+func (c *client) handle() {
+	defer c.source.Close()
 
 	var realBuffer [BUFFER_SIZE]byte
-	var rAddr = self.source.RemoteAddr()
+	var rAddr = c.source.RemoteAddr()
 	var buffer = realBuffer[:]
 
 	// TODO: handle big request header
-	recvd, err := self.source.Read(buffer)
+	recvd, err := c.source.Read(buffer)
 	if err != nil {
 		perror("conn.Read: %s: %s", rAddr, err)
 		return
@@ -171,17 +171,17 @@ func (self *client) handle() {
 	}
 
 	// connect to the target host
-	self.target, err = net.Dial("tcp", req.hostPort)
+	c.target, err = net.Dial("tcp", req.hostPort)
 	if err != nil {
 		perror("net.Dial: %s: %s", rAddr, err)
 		return
 	}
-	defer self.target.Close()
+	defer c.target.Close()
 
 	info("%s -> %s %s", rAddr, req.method, req.hostPort)
 	if req.hasConnectMethod {
 		// HTTPS
-		err = self.handleHttps(buffer)
+		err = c.handleHttps(buffer)
 	} else {
 		// HTTP
 		// update http request (buffer), handle absolute path
@@ -191,7 +191,7 @@ func (self *client) handle() {
 			return
 		}
 
-		err = self.handleHttp(buffer)
+		err = c.handleHttp(buffer)
 	}
 
 	if err != nil {
@@ -199,41 +199,41 @@ func (self *client) handle() {
 	}
 }
 
-func (self *client) handleHttp(buffer []byte) error {
-	err := self.writeSplitRequest(buffer, HTTP_HEADER_SPLIT_SIZE)
+func (c *client) handleHttp(buffer []byte) error {
+	err := c.writeSplitRequest(buffer, HTTP_HEADER_SPLIT_SIZE)
 	if err != nil {
 		return err
 	}
 
-	self.spliceConnection()
+	c.spliceConnection()
 	return nil
 }
 
-func (self *client) handleHttps(buffer []byte) error {
+func (c *client) handleHttps(buffer []byte) error {
 	// send established tunneling status
-	if _, err := self.source.Write(resHttpOk); err != nil {
+	if _, err := c.source.Write(resHttpOk); err != nil {
 		return err
 	}
 
 	// Read HTTPS HELO packet and update `offset` value
-	offset, err := self.source.Read(buffer)
+	offset, err := c.source.Read(buffer)
 	if err != nil {
 		return err
 	}
 
-	err = self.writeSplitRequest(buffer[:offset], HTTPS_HELO_SPLIT_SIZE)
+	err = c.writeSplitRequest(buffer[:offset], HTTPS_HELO_SPLIT_SIZE)
 	if err != nil {
 		return err
 	}
 
-	self.spliceConnection()
+	c.spliceConnection()
 	return nil
 }
 
-func (self *client) writeSplitRequest(buffer []byte, splitSize int) error {
+func (c *client) writeSplitRequest(buffer []byte, splitSize int) error {
 	bLen := len(buffer)
 	for snd := 0; snd < bLen; {
-		s, err := self.target.Write(buffer[snd:splitSize])
+		s, err := c.target.Write(buffer[snd:splitSize])
 		if err != nil {
 			return err
 		}
@@ -252,12 +252,12 @@ func (self *client) writeSplitRequest(buffer []byte, splitSize int) error {
 	return nil
 }
 
-func (self *client) spliceConnection() {
+func (c *client) spliceConnection() {
 	go func() {
-		io.Copy(self.target, self.source)
+		io.Copy(c.target, c.source)
 	}()
 
-	io.Copy(self.source, self.target)
+	io.Copy(c.source, c.target)
 }
 
 const helpMsg = "holytunnel [HOST:PORT]"
